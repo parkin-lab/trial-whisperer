@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.middleware.logging import JsonLoggingMiddleware
-from app.routers import admin, auth, criteria, ctg, screener, trials
+from app.routers import admin, audit, auth, criteria, ctg, screener, trials
 
 settings = get_settings()
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +24,7 @@ app.add_middleware(JsonLoggingMiddleware)
 
 app.include_router(auth.router)
 app.include_router(admin.router)
+app.include_router(audit.router)
 app.include_router(trials.router)
 app.include_router(criteria.router)
 app.include_router(ctg.router)

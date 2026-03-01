@@ -33,9 +33,14 @@ export default function TrialDetail({ user, onLogout }) {
   const [editExpression, setEditExpression] = useState('')
   const [editManualReview, setEditManualReview] = useState(false)
   const [criteriaBusy, setCriteriaBusy] = useState(false)
+  const [auditEntries, setAuditEntries] = useState([])
+  const [auditError, setAuditError] = useState('')
+  const [auditBusy, setAuditBusy] = useState(false)
+  const [expandedAudit, setExpandedAudit] = useState({})
 
   const canUpload = ['owner', 'pi', 'coordinator'].includes(user.role)
   const canReview = ['owner', 'pi', 'coordinator'].includes(user.role)
+  const canAudit = ['owner', 'coordinator'].includes(user.role)
 
   const loadTrialData = async () => {
     const [trialRes, docsRes, amendRes, snapshotRes] = await Promise.all([
@@ -148,6 +153,56 @@ export default function TrialDetail({ user, onLogout }) {
       setCriteriaBusy(false)
     }
   }
+
+  const loadAudit = async () => {
+    if (!canAudit) return
+
+    setAuditBusy(true)
+    setAuditError('')
+    try {
+      const res = await api.get('/audit', { params: { trial_id: id, limit: 200, offset: 0 } })
+      setAuditEntries(res.data.items || [])
+    } catch (err) {
+      setAuditEntries([])
+      setAuditError(err.response?.data?.detail || 'Could not load trial audit.')
+    } finally {
+      setAuditBusy(false)
+    }
+  }
+
+  const toggleAuditDetails = (auditId) => {
+    setExpandedAudit((prev) => ({ ...prev, [auditId]: !prev[auditId] }))
+  }
+
+  const exportTrialAudit = async () => {
+    setAuditBusy(true)
+    setAuditError('')
+    try {
+      const res = await api.post('/audit/export', { trial_id: id }, { responseType: 'blob' })
+      const disposition = res.headers['content-disposition'] || ''
+      const match = disposition.match(/filename=\"?([^"]+)\"?/)
+      const filename = match?.[1] || `trial_${id}_audit.csv`
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }))
+      const link = document.createElement('a')
+      link.href = url
+      link.setAttribute('download', filename)
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+      await loadAudit()
+    } catch (err) {
+      setAuditError(err.response?.data?.detail || 'Could not export trial audit.')
+    } finally {
+      setAuditBusy(false)
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === 'Audit') {
+      loadAudit()
+    }
+  }, [activeTab, id, canAudit])
 
   const content = useMemo(() => {
     if (!trial) return <div className="text-sm">Loading...</div>
@@ -341,6 +396,87 @@ export default function TrialDetail({ user, onLogout }) {
       )
     }
 
+    if (activeTab === 'Audit') {
+      if (!canAudit) {
+        return <div className="text-sm text-slate-600">Audit log is only available to owner and coordinator roles.</div>
+      }
+
+      return (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h4 className="font-display text-lg">Trial Audit Log</h4>
+            {user.role === 'owner' && (
+              <button
+                className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                onClick={exportTrialAudit}
+                disabled={auditBusy}
+              >
+                Export
+              </button>
+            )}
+          </div>
+
+          {auditError && (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{auditError}</div>
+          )}
+          {auditBusy && <div className="text-sm text-slate-500">Loading audit data...</div>}
+
+          <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+            <table className="min-w-full text-sm">
+              <thead className="bg-slate-50 text-left text-slate-600">
+                <tr>
+                  <th className="px-4 py-3">Timestamp</th>
+                  <th className="px-4 py-3">User</th>
+                  <th className="px-4 py-3">Indication</th>
+                  <th className="px-4 py-3">Overall Result</th>
+                  <th className="px-4 py-3">Criteria Breakdown</th>
+                </tr>
+              </thead>
+              <tbody>
+                {auditEntries.map((entry) => {
+                  const trialResult = entry.screen_results?.[id]
+                  const criteria = Array.isArray(trialResult?.criteria) ? trialResult.criteria : []
+                  const isExpanded = Boolean(expandedAudit[entry.id])
+                  return (
+                    <tr className="border-t border-slate-100 align-top" key={entry.id}>
+                      <td className="px-4 py-3">{new Date(entry.timestamp).toLocaleString()}</td>
+                      <td className="px-4 py-3">{entry.user_email || '-'}</td>
+                      <td className="px-4 py-3 uppercase">{entry.indication}</td>
+                      <td className="px-4 py-3">{trialResult?.overall || '-'}</td>
+                      <td className="px-4 py-3">
+                        {criteria.length === 0 ? (
+                          '-'
+                        ) : (
+                          <div>
+                            <button
+                              className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                              onClick={() => toggleAuditDetails(entry.id)}
+                            >
+                              {isExpanded ? 'Hide' : 'Show'} ({criteria.length})
+                            </button>
+                            {isExpanded && (
+                              <div className="mt-2 space-y-1 rounded-lg bg-fog p-2 text-xs">
+                                {criteria.map((criterion) => (
+                                  <div key={`${entry.id}-${criterion.criterion_id}`}>
+                                    {criterion.criterion_id}: {criterion.result}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+            {auditEntries.length === 0 && <div className="p-4 text-sm text-slate-500">No audit entries found for this trial.</div>}
+          </div>
+        </div>
+      )
+    }
+
     return <Placeholder text="Phase 5" />
   }, [
     activeTab,
@@ -354,6 +490,13 @@ export default function TrialDetail({ user, onLogout }) {
     reviewStatus,
     criteriaError,
     criteriaBusy,
+    canAudit,
+    auditEntries,
+    auditError,
+    auditBusy,
+    expandedAudit,
+    id,
+    user.role,
   ])
 
   return (

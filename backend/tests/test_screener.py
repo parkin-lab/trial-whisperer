@@ -94,6 +94,7 @@ async def test_screen_endpoint_orders_results_and_logs_audit(client, db_session)
     assert [item["overall"] for item in payload["results"]] == ["met", "not_met"]
 
     audit_rows = (await db_session.execute(select(AuditLog))).scalars().all()
-    assert len(audit_rows) == 2
-    assert all("age" not in str(row.screen_results) for row in audit_rows)
-    assert all("criteria" in row.screen_results for row in audit_rows)
+    assert len(audit_rows) == 1
+    assert "age" not in str(audit_rows[0].screen_results)
+    assert str(eligible_trial.id) in audit_rows[0].screen_results
+    assert str(ineligible_trial.id) in audit_rows[0].screen_results

@@ -34,3 +34,12 @@ class DomainAllowlistRead(BaseModel):
     domain: str
     added_by: UUID | None
     added_at: datetime
+
+
+class AdminStatsRead(BaseModel):
+    total_users: int
+    active_trials: int
+    total_screens: int
+    screens_this_month: int
+    users_by_role: dict[str, int]
+    trials_by_status: dict[str, int]

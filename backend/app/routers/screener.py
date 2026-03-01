@@ -43,7 +43,20 @@ async def screen_trials(
     trial_result = await db.execute(trial_query.order_by(Trial.created_at.desc()))
     trials = trial_result.scalars().all()
     if not trials:
-        return ScreeningResponse(results=[], screened_at=datetime.now(UTC), engine_version=ENGINE_VERSION)
+        screened_at = datetime.now(UTC)
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                timestamp=screened_at,
+                indication=payload.indication,
+                criteria_version_hash="",
+                engine_version=ENGINE_VERSION,
+                screen_results={},
+                exported_at=None,
+            )
+        )
+        await db.commit()
+        return ScreeningResponse(results=[], screened_at=screened_at, engine_version=ENGINE_VERSION)
 
     trial_ids = [trial.id for trial in trials]
     criteria_result = await db.execute(select(TrialCriteria).where(TrialCriteria.trial_id.in_(trial_ids)))
@@ -76,24 +89,33 @@ async def screen_trials(
     }
     results.sort(key=lambda item: (order.get(item.overall, 99), item.trial_name or ""))
 
+    screened_at = datetime.now(UTC)
+    criteria_hashes = ",".join(item.version_hash for item in results)
+    screen_results: dict[str, dict[str, object]] = {}
     for item in results:
-        audit_row = AuditLog(
-            user_id=user.id,
-            indication=payload.indication,
-            criteria_version_hash=item.version_hash,
-            engine_version=ENGINE_VERSION,
-            screen_results={
-                "trial_id": item.trial_id,
-                "overall": item.overall.value,
-                "criteria": {entry.criterion_id: entry.result.value for entry in item.criteria_results},
-            },
-        )
-        db.add(audit_row)
+        screen_results[item.trial_id] = {
+            "overall": item.overall.value,
+            "criteria": [
+                {"criterion_id": entry.criterion_id, "result": entry.result.value}
+                for entry in item.criteria_results
+            ],
+        }
+
+    audit_row = AuditLog(
+        user_id=user.id,
+        timestamp=screened_at,
+        indication=payload.indication,
+        criteria_version_hash=criteria_hashes,
+        engine_version=ENGINE_VERSION,
+        screen_results=screen_results,
+        exported_at=None,
+    )
+    db.add(audit_row)
 
     await db.commit()
 
     return ScreeningResponse(
         results=results,
-        screened_at=datetime.now(UTC),
+        screened_at=screened_at,
         engine_version=ENGINE_VERSION,
     )

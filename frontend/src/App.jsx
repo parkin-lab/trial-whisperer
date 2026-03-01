@@ -5,10 +5,21 @@ import Login from './pages/Login'
 import Screener from './pages/Screener'
 import Trials from './pages/Trials'
 import TrialDetail from './pages/TrialDetail'
+import Admin from './pages/Admin'
 
 function ProtectedRoute({ children, user }) {
   if (!user) {
     return <Navigate to="/login" replace />
+  }
+  return children
+}
+
+function OwnerRoute({ children, user }) {
+  if (!user) {
+    return <Navigate to="/login" replace />
+  }
+  if (user.role !== 'owner') {
+    return <Navigate to="/trials" replace />
   }
   return children
 }
@@ -80,6 +91,14 @@ export default function App() {
           <ProtectedRoute user={user}>
             <TrialDetail user={user} onLogout={onLogout} />
           </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin"
+        element={
+          <OwnerRoute user={user}>
+            <Admin user={user} onLogout={onLogout} />
+          </OwnerRoute>
         }
       />
       <Route path="*" element={<Navigate to={user ? '/trials' : '/login'} replace />} />

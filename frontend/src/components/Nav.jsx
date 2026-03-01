@@ -21,6 +21,11 @@ export default function Nav({ user, onLogout }) {
           <Link className="text-sm font-medium text-slate-600 hover:text-ink" to="/screen">
             Screener
           </Link>
+          {user.role === 'owner' && (
+            <Link className="text-sm font-medium text-slate-600 hover:text-ink" to="/admin">
+              Admin
+            </Link>
+          )}
         </div>
         <div className="flex items-center gap-3">
           <span className={`badge ${roleClass[user.role] || 'bg-slate-100'}`}>{user.role}</span>
