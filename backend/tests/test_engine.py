@@ -101,10 +101,33 @@ def test_unit_normalization_anc_109l_to_cells_ul() -> None:
 def test_overall_result_severity_ordering() -> None:
     incomplete = _criterion(expression={"op": "gte", "field": "age", "value": 18, "unit": "years"})
     manual = _criterion(expression={"op": "is_true", "field": "x"}, manual_review_required=True)
-    not_met = _criterion(expression={"op": "gte", "field": "ecog", "value": 0})
+    not_met = _criterion(expression={"op": "gte", "field": "ecog", "value": 5})
 
     manual_over_incomplete = evaluate_trial([incomplete, manual], {})
     ineligible_wins = evaluate_trial([incomplete, manual, not_met], {"ecog": 1})
 
     assert manual_over_incomplete.overall == EvaluationResult.MANUAL_REVIEW
     assert ineligible_wins.overall == EvaluationResult.NOT_MET
+
+
+def test_or_compound_met_when_one_branch_met() -> None:
+    """OR: one MET branch should return MET even if others are INCOMPLETE."""
+    criterion = _criterion(
+        expression={
+            "op": "or",
+            "operands": [
+                {"op": "gte", "field": "age", "value": 18, "unit": "years"},
+                {"op": "gte", "field": "missing_field", "value": 5},
+            ],
+        }
+    )
+    result = evaluate_trial([criterion], {"age": 21})
+    assert result.criteria_results[0].result == EvaluationResult.MET
+
+
+def test_exclusion_criterion_with_missing_field_is_incomplete() -> None:
+    """Exclusion criterion where data is missing should be INCOMPLETE, not flipped."""
+    criterion = _criterion(type_value="exclusion", expression={"op": "is_true", "field": "prior_transplant"})
+    result = evaluate_trial([criterion], {})
+    assert result.criteria_results[0].result == EvaluationResult.INCOMPLETE
+    assert result.overall == EvaluationResult.INCOMPLETE

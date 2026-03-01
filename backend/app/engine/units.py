@@ -3,6 +3,7 @@ from __future__ import annotations
 
 CANONICAL_UNITS: dict[str, str] = {
     "anc": "cells/uL",
+    "plt": "x10^3/uL",
     "hgb": "g/dL",
     "cr": "mg/dL",
     "bili": "mg/dL",
@@ -27,6 +28,15 @@ _ANC_FACTORS = {
     "x109/l": 1000.0,
     "10^9/l": 1000.0,
     "10e9/l": 1000.0,
+}
+
+_PLT_FACTORS = {
+    "x10^3/ul": 1.0,
+    "10^3/ul": 1.0,
+    "x10^9/l": 1.0,  # same numeric scale when expressed as 10^3/uL
+    "10^9/l": 1.0,
+    "x10e3/ul": 1.0,
+    "cells/ul": 0.001,  # rare but handle it
 }
 
 _HGB_FACTORS = {
@@ -85,6 +95,8 @@ def normalize(field: str, value: float | int, from_unit: str | None) -> float:
 
     if field_key == "anc":
         factor = _ANC_FACTORS.get(unit_key)
+    elif field_key == "plt":
+        factor = _PLT_FACTORS.get(unit_key)
     elif field_key == "hgb":
         factor = _HGB_FACTORS.get(unit_key)
     elif field_key == "cr":

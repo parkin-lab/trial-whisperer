@@ -126,8 +126,21 @@ def _evaluate_boolean(expr: BooleanExpr, patient_data: dict[str, Any]) -> Evalua
         return EvaluationResult.INCOMPLETE
 
     value = patient_data[expr.field]
-    if not isinstance(value, bool):
+    # Coerce common truthy/falsy string and int representations from form inputs
+    if isinstance(value, bool):
+        coerced = value
+    elif isinstance(value, int) and value in (0, 1):
+        coerced = bool(value)
+    elif isinstance(value, str):
+        if value.strip().lower() in {"true", "yes", "1"}:
+            coerced = True
+        elif value.strip().lower() in {"false", "no", "0"}:
+            coerced = False
+        else:
+            return EvaluationResult.MANUAL_REVIEW
+    else:
         return EvaluationResult.MANUAL_REVIEW
+    value = coerced
 
     if expr.op == "is_true":
         return EvaluationResult.MET if value else EvaluationResult.NOT_MET
@@ -159,7 +172,7 @@ def _evaluate_temporal(expr: TemporalExpr, patient_data: dict[str, Any]) -> Eval
         return EvaluationResult.MANUAL_REVIEW
 
     now = datetime.now(UTC)
-    delta_days = abs((now - observed).days)
+    delta_days = abs((now - observed).total_seconds()) / 86400
     return EvaluationResult.MET if delta_days <= expr.days else EvaluationResult.NOT_MET
 
 
@@ -314,19 +327,21 @@ def _overall(results: list[CriterionResult]) -> EvaluationResult:
     return EvaluationResult.MET
 
 
-def evaluate_trial(trial_criteria: list[CriterionLike], patient_data: dict[str, Any]) -> TrialResult:
+def evaluate_trial(
+    trial_criteria: list[CriterionLike], patient_data: dict[str, Any], trial_id: str | None = None
+) -> TrialResult:
     if not trial_criteria:
         return TrialResult(
-            trial_id="",
+            trial_id=trial_id or "",
             overall=EvaluationResult.MANUAL_REVIEW,
             criteria_results=[],
             version_hash=_criteria_hash([]),
         )
 
-    trial_id = str(trial_criteria[0].trial_id)
+    resolved_trial_id = trial_id or str(trial_criteria[0].trial_id)
     criteria_results = [_criterion_result(criterion, patient_data) for criterion in trial_criteria]
     return TrialResult(
-        trial_id=trial_id,
+        trial_id=resolved_trial_id,
         overall=_overall(criteria_results),
         criteria_results=criteria_results,
         version_hash=_criteria_hash(trial_criteria),
