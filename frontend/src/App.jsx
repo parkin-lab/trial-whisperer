@@ -2,6 +2,7 @@ import { Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import api from './lib/api'
 import Login from './pages/Login'
+import Screener from './pages/Screener'
 import Trials from './pages/Trials'
 import TrialDetail from './pages/TrialDetail'
 
@@ -62,6 +63,14 @@ export default function App() {
         element={
           <ProtectedRoute user={user}>
             <Trials user={user} onLogout={onLogout} />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/screen"
+        element={
+          <ProtectedRoute user={user}>
+            <Screener user={user} onLogout={onLogout} />
           </ProtectedRoute>
         }
       />

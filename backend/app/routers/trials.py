@@ -14,7 +14,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.models.enums import Indication, JobStatus, TrialStatus, UserRole
-from app.models.trial import BackgroundJob, Trial, TrialAmendment, TrialDocument
+from app.models.trial import BackgroundJob, Trial, TrialAmendment, TrialCriteria, TrialDocument
 from app.models.user import User
 from app.schemas.trial import TrialAmendmentRead, TrialCreate, TrialDocumentRead, TrialRead, TrialUpdate
 from app.services.documents import extract_text, summarize_diff
@@ -153,6 +153,35 @@ async def archive_trial(
 ) -> TrialRead:
     trial = await _get_trial_or_404(db, trial_id)
     trial.status = TrialStatus.archived
+    await db.commit()
+    await db.refresh(trial)
+    return TrialRead.model_validate(trial)
+
+
+@router.post("/{trial_id}/activate", response_model=TrialRead)
+async def activate_trial(
+    trial_id: UUID,
+    _: Annotated[User, Depends(require_role(UserRole.pi, UserRole.coordinator, UserRole.owner))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> TrialRead:
+    trial = await _get_trial_or_404(db, trial_id)
+
+    criteria_result = await db.execute(select(TrialCriteria).where(TrialCriteria.trial_id == trial_id))
+    criteria = criteria_result.scalars().all()
+    if not criteria:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Cannot activate trial without eligibility criteria",
+        )
+
+    blocking_count = sum(1 for item in criteria if item.approved_at is None and not item.manual_review_required)
+    if blocking_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Cannot activate trial until all criteria are approved or flagged for manual review",
+        )
+
+    trial.status = TrialStatus.active
     await db.commit()
     await db.refresh(trial)
     return TrialRead.model_validate(trial)

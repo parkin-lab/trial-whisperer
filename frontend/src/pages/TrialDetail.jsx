@@ -6,6 +6,17 @@ import api from '../lib/api'
 
 const tabs = ['Overview', 'Documents', 'Criteria', 'Amendments', 'Audit']
 
+const confidenceClass = {
+  high: 'bg-emerald-100 text-emerald-800',
+  needs_review: 'bg-amber-100 text-amber-800',
+}
+
+const approvalClass = {
+  approved: 'bg-emerald-100 text-emerald-800',
+  pending: 'bg-slate-200 text-slate-700',
+  manual: 'bg-amber-100 text-amber-800',
+}
+
 export default function TrialDetail({ user, onLogout }) {
   const { id } = useParams()
   const [activeTab, setActiveTab] = useState('Overview')
@@ -13,11 +24,20 @@ export default function TrialDetail({ user, onLogout }) {
   const [documents, setDocuments] = useState([])
   const [amendments, setAmendments] = useState([])
   const [snapshots, setSnapshots] = useState([])
+  const [criteria, setCriteria] = useState([])
+  const [reviewStatus, setReviewStatus] = useState(null)
+  const [criteriaError, setCriteriaError] = useState('')
   const [uploadOpen, setUploadOpen] = useState(false)
+  const [editModalOpen, setEditModalOpen] = useState(false)
+  const [editTarget, setEditTarget] = useState(null)
+  const [editExpression, setEditExpression] = useState('')
+  const [editManualReview, setEditManualReview] = useState(false)
+  const [criteriaBusy, setCriteriaBusy] = useState(false)
 
   const canUpload = ['owner', 'pi', 'coordinator'].includes(user.role)
+  const canReview = ['owner', 'pi', 'coordinator'].includes(user.role)
 
-  const load = async () => {
+  const loadTrialData = async () => {
     const [trialRes, docsRes, amendRes, snapshotRes] = await Promise.all([
       api.get(`/trials/${id}`),
       api.get(`/trials/${id}/documents`),
@@ -31,9 +51,103 @@ export default function TrialDetail({ user, onLogout }) {
     setSnapshots(snapshotRes.data ? [snapshotRes.data] : [])
   }
 
+  const loadCriteria = async () => {
+    try {
+      const [criteriaRes, statusRes] = await Promise.all([
+        api.get(`/trials/${id}/criteria`),
+        api.get(`/trials/${id}/criteria/review-status`),
+      ])
+      setCriteria(criteriaRes.data)
+      setReviewStatus(statusRes.data)
+      setCriteriaError('')
+    } catch (err) {
+      setCriteria([])
+      setReviewStatus(null)
+      setCriteriaError(err.response?.data?.detail || 'Could not load criteria data.')
+    }
+  }
+
+  const load = async () => {
+    await Promise.all([loadTrialData(), loadCriteria()])
+  }
+
   useEffect(() => {
     load()
   }, [id])
+
+  const parseCriteria = async () => {
+    setCriteriaBusy(true)
+    setCriteriaError('')
+    try {
+      await api.post(`/trials/${id}/criteria/parse`)
+      await loadCriteria()
+    } catch (err) {
+      setCriteriaError(err.response?.data?.detail || 'Criteria parsing failed.')
+    } finally {
+      setCriteriaBusy(false)
+    }
+  }
+
+  const approveCriterion = async (criterionId) => {
+    setCriteriaBusy(true)
+    setCriteriaError('')
+    try {
+      await api.post(`/trials/${id}/criteria/${criterionId}/approve`)
+      await loadCriteria()
+    } catch (err) {
+      setCriteriaError(err.response?.data?.detail || 'Approve failed.')
+    } finally {
+      setCriteriaBusy(false)
+    }
+  }
+
+  const approveAll = async () => {
+    setCriteriaBusy(true)
+    setCriteriaError('')
+    try {
+      await api.post(`/trials/${id}/criteria/approve-all`)
+      await loadCriteria()
+    } catch (err) {
+      setCriteriaError(err.response?.data?.detail || 'Bulk approve failed.')
+    } finally {
+      setCriteriaBusy(false)
+    }
+  }
+
+  const openEdit = (criterion) => {
+    setEditTarget(criterion)
+    setEditExpression(JSON.stringify(criterion.expression, null, 2))
+    setEditManualReview(criterion.manual_review_required)
+    setEditModalOpen(true)
+  }
+
+  const saveEdit = async () => {
+    if (!editTarget) return
+
+    let parsedExpression
+    try {
+      parsedExpression = JSON.parse(editExpression)
+    } catch {
+      setCriteriaError('Expression must be valid JSON.')
+      return
+    }
+
+    setCriteriaBusy(true)
+    setCriteriaError('')
+    try {
+      await api.patch(`/trials/${id}/criteria/${editTarget.id}`, {
+        expression: parsedExpression,
+        manual_review_required: editManualReview,
+      })
+      setEditModalOpen(false)
+      setEditTarget(null)
+      await loadCriteria()
+    } catch (err) {
+      setCriteriaError(err.response?.data?.detail || 'Could not save criterion changes.')
+    } finally {
+      setCriteriaBusy(false)
+    }
+  }
 
   const content = useMemo(() => {
     if (!trial) return <div className="text-sm">Loading...</div>
@@ -100,7 +214,110 @@ export default function TrialDetail({ user, onLogout }) {
     }
 
     if (activeTab === 'Criteria') {
-      return <Placeholder text="Phase 3" />
+      return (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 className="font-display text-lg">Criteria Review</h4>
+              {canReview && (
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    onClick={parseCriteria}
+                    disabled={criteriaBusy}
+                  >
+                    Parse Criteria
+                  </button>
+                  <button
+                    className="rounded-lg bg-ink px-3 py-2 text-sm text-white disabled:opacity-50"
+                    onClick={approveAll}
+                    disabled={criteriaBusy}
+                  >
+                    Approve All High Confidence
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {reviewStatus && (
+              <div className="mt-3 rounded-lg bg-fog px-3 py-2 text-sm text-slate-700">
+                {reviewStatus.approved} of {reviewStatus.total} criteria approved - {reviewStatus.blocking_count} blocking activation
+              </div>
+            )}
+
+            {criteriaError && (
+              <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                {criteriaError}
+              </div>
+            )}
+
+            <div className="mt-3 overflow-x-auto rounded-xl border border-slate-200">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-50 text-left text-slate-600">
+                  <tr>
+                    <th className="px-4 py-3">Raw text</th>
+                    <th className="px-4 py-3">Expression</th>
+                    <th className="px-4 py-3">Confidence</th>
+                    <th className="px-4 py-3">Approval</th>
+                    {canReview && <th className="px-4 py-3">Actions</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {criteria.map((row) => {
+                    const approvalStatus = row.approved_at ? 'approved' : row.manual_review_required ? 'manual' : 'pending'
+                    return (
+                      <tr key={row.id} className="border-t border-slate-100 align-top">
+                        <td className="px-4 py-3">{row.text}</td>
+                        <td className="px-4 py-3">
+                          <pre className="max-w-md overflow-auto whitespace-pre-wrap rounded bg-fog p-2 text-xs text-slate-700">
+                            {JSON.stringify(row.expression, null, 2)}
+                          </pre>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`badge ${confidenceClass[row.confidence] || 'bg-slate-100 text-slate-700'}`}>
+                            {row.confidence}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`badge ${approvalClass[approvalStatus] || 'bg-slate-100 text-slate-700'}`}>
+                            {approvalStatus === 'approved'
+                              ? 'Approved'
+                              : approvalStatus === 'manual'
+                                ? 'Manual Review Flagged'
+                                : 'Pending'}
+                          </span>
+                        </td>
+                        {canReview && (
+                          <td className="px-4 py-3">
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                                onClick={() => openEdit(row)}
+                              >
+                                Edit Expression
+                              </button>
+                              {!row.approved_at && (
+                                <button
+                                  className="rounded-lg bg-ink px-2 py-1 text-xs text-white"
+                                  onClick={() => approveCriterion(row.id)}
+                                  disabled={criteriaBusy}
+                                >
+                                  Approve
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        )}
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+              {criteria.length === 0 && <div className="p-4 text-sm text-slate-500">No criteria parsed yet.</div>}
+            </div>
+          </div>
+        </div>
+      )
     }
 
     if (activeTab === 'Amendments') {
@@ -125,7 +342,19 @@ export default function TrialDetail({ user, onLogout }) {
     }
 
     return <Placeholder text="Phase 5" />
-  }, [activeTab, trial, snapshots, documents, amendments, canUpload])
+  }, [
+    activeTab,
+    trial,
+    snapshots,
+    documents,
+    amendments,
+    canUpload,
+    canReview,
+    criteria,
+    reviewStatus,
+    criteriaError,
+    criteriaBusy,
+  ])
 
   return (
     <div>
@@ -156,6 +385,46 @@ export default function TrialDetail({ user, onLogout }) {
         trialId={id}
         onUploaded={load}
       />
+
+      {editModalOpen && editTarget && (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-ink/50 p-4">
+          <div className="w-full max-w-2xl rounded-2xl bg-white p-5 shadow-2xl">
+            <h3 className="font-display text-xl">Edit Criterion Expression</h3>
+            <p className="mt-1 text-xs text-slate-500">{editTarget.text}</p>
+
+            <textarea
+              className="mt-4 h-64 w-full rounded-lg border border-slate-300 p-3 font-mono text-xs"
+              value={editExpression}
+              onChange={(e) => setEditExpression(e.target.value)}
+            />
+
+            <label className="mt-3 flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={editManualReview}
+                onChange={(e) => setEditManualReview(e.target.checked)}
+              />
+              Manual review required
+            </label>
+
+            <div className="mt-4 flex justify-between">
+              <button
+                className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                onClick={() => setEditModalOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded-lg bg-ink px-4 py-2 text-sm text-white"
+                onClick={saveEdit}
+                disabled={criteriaBusy}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

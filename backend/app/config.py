@@ -27,6 +27,7 @@ class Settings(BaseSettings):
 
     frontend_url: str = Field(default="http://localhost:5173", alias="FRONTEND_URL")
     uploads_dir: str = "uploads"
+    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
 
 
 @lru_cache
