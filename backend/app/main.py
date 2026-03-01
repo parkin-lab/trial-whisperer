@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.middleware.logging import JsonLoggingMiddleware
-from app.routers import admin, audit, auth, criteria, ctg, screener, trials
+from app.routers import admin, audit, auth, criteria, ctg, qa, screener, trials
 
 settings = get_settings()
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +29,7 @@ app.include_router(trials.router)
 app.include_router(criteria.router)
 app.include_router(ctg.router)
 app.include_router(screener.router)
+app.include_router(qa.router)
 
 
 @app.on_event("startup")

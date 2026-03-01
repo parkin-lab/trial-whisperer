@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import Nav from '../components/Nav'
+import ProtocolQA from '../components/ProtocolQA'
 import UploadModal from '../components/UploadModal'
 import api from '../lib/api'
 
-const tabs = ['Overview', 'Documents', 'Criteria', 'Amendments', 'Audit']
+const tabs = ['Overview', 'Documents', 'Criteria', 'Amendments', 'Q&A', 'Audit']
 
 const confidenceClass = {
   high: 'bg-emerald-100 text-emerald-800',
@@ -37,6 +38,7 @@ export default function TrialDetail({ user, onLogout }) {
   const [auditError, setAuditError] = useState('')
   const [auditBusy, setAuditBusy] = useState(false)
   const [expandedAudit, setExpandedAudit] = useState({})
+  const [qaStatus, setQaStatus] = useState(null)
 
   const canUpload = ['owner', 'pi', 'coordinator'].includes(user.role)
   const canReview = ['owner', 'pi', 'coordinator'].includes(user.role)
@@ -73,7 +75,16 @@ export default function TrialDetail({ user, onLogout }) {
   }
 
   const load = async () => {
-    await Promise.all([loadTrialData(), loadCriteria()])
+    await Promise.all([loadTrialData(), loadCriteria(), loadQaStatus()])
+  }
+
+  const loadQaStatus = async () => {
+    try {
+      const res = await api.get(`/trials/${id}/qa/status`)
+      setQaStatus(res.data)
+    } catch {
+      setQaStatus(null)
+    }
   }
 
   useEffect(() => {
@@ -217,6 +228,14 @@ export default function TrialDetail({ user, onLogout }) {
             <Card label="Phase" value={trial.phase || '-'} />
             <Card label="Sponsor" value={trial.sponsor || '-'} />
             <Card label="Status" value={trial.status} />
+            <Card
+              label="Indexing"
+              value={
+                qaStatus?.embeddings_exist
+                  ? `✅ Indexed (${qaStatus.chunk_count} chunks)`
+                  : '🟡 Pending'
+              }
+            />
           </div>
           <div className="rounded-xl border border-slate-200 bg-white p-4">
             <h4 className="font-display text-lg">CTG Snapshot</h4>
@@ -396,6 +415,10 @@ export default function TrialDetail({ user, onLogout }) {
       )
     }
 
+    if (activeTab === 'Q&A') {
+      return <ProtocolQA trialId={id} />
+    }
+
     if (activeTab === 'Audit') {
       if (!canAudit) {
         return <div className="text-sm text-slate-600">Audit log is only available to owner and coordinator roles.</div>
@@ -495,6 +518,7 @@ export default function TrialDetail({ user, onLogout }) {
     auditError,
     auditBusy,
     expandedAudit,
+    qaStatus,
     id,
     user.role,
   ])

@@ -6,15 +6,20 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.sqltypes import JSON
 from sqlalchemy.types import UserDefinedType
 
+try:
+    from pgvector.sqlalchemy import Vector as PGVector
+except ModuleNotFoundError:
+    class PGVector(UserDefinedType):
+        cache_ok = True
+
+        def __init__(self, dim: int) -> None:
+            self.dim = dim
+
+        def get_col_spec(self, **kwargs: object) -> str:
+            return f"vector({self.dim})"
+
 from app.database import Base
 from app.models.enums import ConfidenceLevel, CriteriaType, Indication, JobStatus, TrialStatus
-
-
-class Vector1536(UserDefinedType):
-    cache_ok = True
-
-    def get_col_spec(self, **kwargs: object) -> str:
-        return "vector(1536)"
 
 
 class Trial(Base):
@@ -95,7 +100,7 @@ class ProtocolEmbedding(Base):
     trial_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("trials.id", ondelete="CASCADE"), index=True)
     document_version: Mapped[int] = mapped_column(Integer)
     chunk_text: Mapped[str] = mapped_column(Text)
-    embedding: Mapped[str] = mapped_column(Vector1536())
+    embedding: Mapped[list[float]] = mapped_column(PGVector(1536))
     chunk_index: Mapped[int] = mapped_column(Integer)
 
 

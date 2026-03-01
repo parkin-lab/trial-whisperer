@@ -39,6 +39,20 @@ async def _get_trial_or_404(db: AsyncSession, trial_id: UUID) -> Trial:
 
 
 async def _enqueue_parse_job(job_id: UUID) -> None:
+    await _enqueue_worker_job("parse_trial_document", str(job_id), extra={"job_id": str(job_id)})
+
+
+async def _enqueue_embed_job(trial_id: UUID, document_version: int, file_path: str) -> None:
+    await _enqueue_worker_job(
+        "embed_protocol_document",
+        str(trial_id),
+        document_version,
+        file_path,
+        extra={"trial_id": str(trial_id), "document_version": document_version},
+    )
+
+
+async def _enqueue_worker_job(name: str, *args: object, extra: dict | None = None) -> None:
     try:
         if hasattr(RedisSettings, "from_dsn"):
             redis_settings = RedisSettings.from_dsn(settings.redis_url)
@@ -52,10 +66,11 @@ async def _enqueue_parse_job(job_id: UUID) -> None:
                 password=parsed.password,
             )
         pool = await create_pool(redis_settings)
-        await pool.enqueue_job("parse_trial_document", str(job_id))
+        await pool.enqueue_job(name, *args)
         await pool.aclose()
     except Exception:
-        logger.exception("Failed to enqueue ARQ parse job", extra={"job_id": str(job_id)})
+        context = extra or {}
+        logger.exception("Failed to enqueue ARQ job", extra={"job_name": name, **context})
 
 
 async def _save_upload(trial_id: UUID, version: int, upload: UploadFile) -> tuple[str, str]:
@@ -236,6 +251,7 @@ async def upload_trial_document(
     await db.refresh(job)
 
     await _enqueue_parse_job(job.id)
+    await _enqueue_embed_job(trial_id, next_version, file_path)
     return TrialDocumentRead.model_validate(doc)
 
 
