@@ -1,5 +1,5 @@
 import { Navigate, Route, Routes, useNavigate } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import { useAuth } from './context/AuthContext'
 import api from './lib/api'
 import Login from './pages/Login'
 import Screener from './pages/Screener'
@@ -7,14 +7,16 @@ import Trials from './pages/Trials'
 import TrialDetail from './pages/TrialDetail'
 import Admin from './pages/Admin'
 
-function ProtectedRoute({ children, user }) {
+function ProtectedRoute({ children }) {
+  const { user } = useAuth()
   if (!user) {
     return <Navigate to="/login" replace />
   }
   return children
 }
 
-function OwnerRoute({ children, user }) {
+function OwnerRoute({ children }) {
+  const { user } = useAuth()
   if (!user) {
     return <Navigate to="/login" replace />
   }
@@ -25,40 +27,20 @@ function OwnerRoute({ children, user }) {
 }
 
 export default function App() {
-  const [user, setUser] = useState(null)
-  const [loading, setLoading] = useState(true)
+  const { user, loading, login, logout } = useAuth()
   const navigate = useNavigate()
-
-  useEffect(() => {
-    const token = localStorage.getItem('tw_access_token')
-    if (!token) {
-      setLoading(false)
-      return
-    }
-
-    api
-      .get('/auth/me')
-      .then((res) => setUser(res.data))
-      .catch(() => {
-        localStorage.removeItem('tw_access_token')
-        localStorage.removeItem('tw_refresh_token')
-      })
-      .finally(() => setLoading(false))
-  }, [])
 
   const onLogin = async (email, password) => {
     const res = await api.post('/auth/login', { email, password })
-    localStorage.setItem('tw_access_token', res.data.access_token)
-    localStorage.setItem('tw_refresh_token', res.data.refresh_token)
-    const me = await api.get('/auth/me')
-    setUser(me.data)
+    const me = await api.get('/auth/me', {
+      headers: { Authorization: `Bearer ${res.data.access_token}` },
+    })
+    login(res.data.access_token, me.data, res.data.refresh_token)
     navigate('/trials')
   }
 
   const onLogout = () => {
-    localStorage.removeItem('tw_access_token')
-    localStorage.removeItem('tw_refresh_token')
-    setUser(null)
+    logout()
     navigate('/login')
   }
 
@@ -72,32 +54,32 @@ export default function App() {
       <Route
         path="/trials"
         element={
-          <ProtectedRoute user={user}>
-            <Trials user={user} onLogout={onLogout} />
+          <ProtectedRoute>
+            <Trials onLogout={onLogout} />
           </ProtectedRoute>
         }
       />
       <Route
         path="/screen"
         element={
-          <ProtectedRoute user={user}>
-            <Screener user={user} onLogout={onLogout} />
+          <ProtectedRoute>
+            <Screener onLogout={onLogout} />
           </ProtectedRoute>
         }
       />
       <Route
         path="/trials/:id"
         element={
-          <ProtectedRoute user={user}>
-            <TrialDetail user={user} onLogout={onLogout} />
+          <ProtectedRoute>
+            <TrialDetail onLogout={onLogout} />
           </ProtectedRoute>
         }
       />
       <Route
         path="/admin"
         element={
-          <OwnerRoute user={user}>
-            <Admin user={user} onLogout={onLogout} />
+          <OwnerRoute>
+            <Admin onLogout={onLogout} />
           </OwnerRoute>
         }
       />

@@ -126,7 +126,7 @@ async def search_protocol(
 
     client = AsyncOpenAI(api_key=settings.openai_api_key)
     embedding_response = await client.embeddings.create(
-        model="text-embedding-3-small",
+        model=settings.embedding_model,
         input=query,
     )
     query_embedding = embedding_response.data[0].embedding

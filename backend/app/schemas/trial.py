@@ -50,6 +50,7 @@ class TrialDocumentRead(BaseModel):
     filename: str
     file_path: str
     uploaded_by: UUID
+    uploaded_by_email: str | None = None
     uploaded_at: datetime
 
 
@@ -62,6 +63,7 @@ class TrialAmendmentRead(BaseModel):
     to_version: int
     summary: str
     uploaded_by: UUID
+    uploaded_by_email: str | None = None
     uploaded_at: datetime
 
 

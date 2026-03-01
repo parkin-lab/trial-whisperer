@@ -172,7 +172,7 @@ async def embed_protocol_document(ctx: dict, trial_id: str, document_version: in
         for chunk_index, chunk_text in enumerate(chunks):
             try:
                 embedding_response = await client.embeddings.create(
-                    model="text-embedding-3-small",
+                    model=settings.embedding_model,
                     input=chunk_text,
                 )
             except Exception:

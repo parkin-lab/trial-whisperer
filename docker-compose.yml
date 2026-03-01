@@ -3,64 +3,93 @@ version: '3.9'
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: trial_whisperer
+      POSTGRES_DB: trialwhisperer
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
       - '5432:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d trialwhisperer']
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
       - '6379:6379'
+    mem_limit: 256m
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   backend:
     build:
       context: ./backend
+    restart: unless-stopped
     env_file:
       - .env
     volumes:
       - ./backend:/app
-      - ./uploads:/app/uploads
+      - uploads_data:/app/uploads
     ports:
       - '8000:8000'
+    mem_limit: 512m
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   worker:
     build:
       context: ./backend
+    restart: unless-stopped
     env_file:
       - .env
     volumes:
       - ./backend:/app
-      - ./uploads:/app/uploads
-    command: ["arq", "app.workers.tasks.WorkerSettings"]
+      - uploads_data:/app/uploads
+    command: ['python', '-m', 'arq', 'app.workers.tasks.WorkerSettings']
+    mem_limit: 512m
     depends_on:
-      - backend
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
 
   frontend:
     build:
       context: ./frontend
+    restart: unless-stopped
     ports:
-      - '5173:80'
+      - '3000:80'
     depends_on:
-      - backend
+      backend:
+        condition: service_started
 
   pgadmin:
     image: dpage/pgadmin4
+    restart: unless-stopped
+    profiles: ['dev']
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@example.com
       PGADMIN_DEFAULT_PASSWORD: admin
     ports:
       - '5050:80'
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:
+  uploads_data:

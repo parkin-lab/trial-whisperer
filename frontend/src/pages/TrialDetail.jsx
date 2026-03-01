@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import Nav from '../components/Nav'
 import ProtocolQA from '../components/ProtocolQA'
 import UploadModal from '../components/UploadModal'
+import { useAuth } from '../context/AuthContext'
 import api from '../lib/api'
-
-const tabs = ['Overview', 'Documents', 'Criteria', 'Amendments', 'Q&A', 'Audit']
 
 const confidenceClass = {
   high: 'bg-emerald-100 text-emerald-800',
@@ -18,8 +17,17 @@ const approvalClass = {
   manual: 'bg-amber-100 text-amber-800',
 }
 
-export default function TrialDetail({ user, onLogout }) {
+function truncateSummary(value, maxLength = 180) {
+  if (!value) return ''
+  if (value.length <= maxLength) return value
+  return `${value.slice(0, maxLength)}...`
+}
+
+export default function TrialDetail({ onLogout }) {
+  const { user } = useAuth()
   const { id } = useParams()
+  const navigate = useNavigate()
+
   const [activeTab, setActiveTab] = useState('Overview')
   const [trial, setTrial] = useState(null)
   const [documents, setDocuments] = useState([])
@@ -39,10 +47,32 @@ export default function TrialDetail({ user, onLogout }) {
   const [auditBusy, setAuditBusy] = useState(false)
   const [expandedAudit, setExpandedAudit] = useState({})
   const [qaStatus, setQaStatus] = useState(null)
+  const [expandedAmendments, setExpandedAmendments] = useState({})
+  const [trialBusy, setTrialBusy] = useState(false)
+  const [trialError, setTrialError] = useState('')
+
+  if (!user) {
+    return null
+  }
 
   const canUpload = ['owner', 'pi', 'coordinator'].includes(user.role)
   const canReview = ['owner', 'pi', 'coordinator'].includes(user.role)
   const canAudit = ['owner', 'coordinator'].includes(user.role)
+  const canArchive = ['owner', 'pi'].includes(user.role)
+  const canDelete = user.role === 'owner'
+
+  const tabs = useMemo(() => {
+    const available = ['Overview', 'Documents', 'Criteria', 'Amendments', 'Q&A']
+    if (canAudit) {
+      available.push('Audit')
+    }
+    return available
+  }, [canAudit])
+
+  const documentsByVersion = useMemo(
+    () => Object.fromEntries(documents.map((doc) => [doc.version, doc])),
+    [documents],
+  )
 
   const loadTrialData = async () => {
     const [trialRes, docsRes, amendRes, snapshotRes] = await Promise.all([
@@ -74,10 +104,6 @@ export default function TrialDetail({ user, onLogout }) {
     }
   }
 
-  const load = async () => {
-    await Promise.all([loadTrialData(), loadCriteria(), loadQaStatus()])
-  }
-
   const loadQaStatus = async () => {
     try {
       const res = await api.get(`/trials/${id}/qa/status`)
@@ -87,9 +113,19 @@ export default function TrialDetail({ user, onLogout }) {
     }
   }
 
+  const load = async () => {
+    await Promise.all([loadTrialData(), loadCriteria(), loadQaStatus()])
+  }
+
   useEffect(() => {
     load()
   }, [id])
+
+  useEffect(() => {
+    if (!tabs.includes(activeTab)) {
+      setActiveTab('Overview')
+    }
+  }, [activeTab, tabs])
 
   const parseCriteria = async () => {
     setCriteriaBusy(true)
@@ -127,6 +163,36 @@ export default function TrialDetail({ user, onLogout }) {
       setCriteriaError(err.response?.data?.detail || 'Bulk approve failed.')
     } finally {
       setCriteriaBusy(false)
+    }
+  }
+
+  const archiveTrial = async () => {
+    if (!canArchive) return
+    setTrialBusy(true)
+    setTrialError('')
+    try {
+      const res = await api.post(`/trials/${id}/archive`)
+      setTrial(res.data)
+    } catch (err) {
+      setTrialError(err.response?.data?.detail || 'Could not archive trial.')
+    } finally {
+      setTrialBusy(false)
+    }
+  }
+
+  const deleteTrial = async () => {
+    if (!canDelete) return
+    const confirmed = window.confirm('Delete this trial permanently? This action cannot be undone.')
+    if (!confirmed) return
+
+    setTrialBusy(true)
+    setTrialError('')
+    try {
+      await api.delete(`/trials/${id}`)
+      navigate('/trials')
+    } catch (err) {
+      setTrialError(err.response?.data?.detail || 'Could not delete trial.')
+      setTrialBusy(false)
     }
   }
 
@@ -181,10 +247,6 @@ export default function TrialDetail({ user, onLogout }) {
     }
   }
 
-  const toggleAuditDetails = (auditId) => {
-    setExpandedAudit((prev) => ({ ...prev, [auditId]: !prev[auditId] }))
-  }
-
   const exportTrialAudit = async () => {
     setAuditBusy(true)
     setAuditError('')
@@ -209,6 +271,30 @@ export default function TrialDetail({ user, onLogout }) {
     }
   }
 
+  const downloadDocument = async (documentId, filename) => {
+    try {
+      const res = await api.get(`/trials/${id}/documents/${documentId}/download`, { responseType: 'blob' })
+      const url = window.URL.createObjectURL(new Blob([res.data]))
+      const link = document.createElement('a')
+      link.href = url
+      link.setAttribute('download', filename)
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (err) {
+      setTrialError(err.response?.data?.detail || 'Could not download document.')
+    }
+  }
+
+  const toggleAuditDetails = (auditId) => {
+    setExpandedAudit((prev) => ({ ...prev, [auditId]: !prev[auditId] }))
+  }
+
+  const toggleAmendment = (amendmentId) => {
+    setExpandedAmendments((prev) => ({ ...prev, [amendmentId]: !prev[amendmentId] }))
+  }
+
   useEffect(() => {
     if (activeTab === 'Audit') {
       loadAudit()
@@ -221,6 +307,37 @@ export default function TrialDetail({ user, onLogout }) {
     if (activeTab === 'Overview') {
       return (
         <div className="space-y-4">
+          {(canArchive || canDelete) && (
+            <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <h4 className="font-display text-lg">Trial Actions</h4>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {canArchive && (
+                  <button
+                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    onClick={archiveTrial}
+                    disabled={trialBusy || trial.status === 'archived'}
+                  >
+                    Archive Trial
+                  </button>
+                )}
+                {canDelete && (
+                  <button
+                    className="rounded-lg border border-rose-300 px-3 py-2 text-sm text-rose-700"
+                    onClick={deleteTrial}
+                    disabled={trialBusy}
+                  >
+                    Delete Trial
+                  </button>
+                )}
+              </div>
+              {trialError && (
+                <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                  {trialError}
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="grid gap-3 md:grid-cols-2">
             <Card label="Nickname" value={trial.nickname} />
             <Card label="NCT ID" value={trial.nct_id || '-'} />
@@ -230,13 +347,10 @@ export default function TrialDetail({ user, onLogout }) {
             <Card label="Status" value={trial.status} />
             <Card
               label="Indexing"
-              value={
-                qaStatus?.embeddings_exist
-                  ? `✅ Indexed (${qaStatus.chunk_count} chunks)`
-                  : '🟡 Pending'
-              }
+              value={qaStatus?.embeddings_exist ? `Indexed (${qaStatus.chunk_count} chunks)` : 'Pending'}
             />
           </div>
+
           <div className="rounded-xl border border-slate-200 bg-white p-4">
             <h4 className="font-display text-lg">CTG Snapshot</h4>
             {snapshots.length === 0 ? (
@@ -272,12 +386,19 @@ export default function TrialDetail({ user, onLogout }) {
             ) : (
               <ul className="divide-y divide-slate-100">
                 {documents.map((doc) => (
-                  <li className="flex items-center justify-between p-3 text-sm" key={doc.id}>
+                  <li className="flex items-center justify-between gap-4 p-3 text-sm" key={doc.id}>
                     <div>
                       <div className="font-medium">v{doc.version} - {doc.filename}</div>
-                      <div className="text-xs text-slate-500">{new Date(doc.uploaded_at).toLocaleString()}</div>
+                      <div className="text-xs text-slate-500">
+                        {new Date(doc.uploaded_at).toLocaleString()} by {doc.uploaded_by_email || doc.uploaded_by}
+                      </div>
                     </div>
-                    <span className="text-xs text-slate-500">{doc.file_path}</span>
+                    <button
+                      className="rounded-lg border border-slate-300 px-3 py-1 text-xs"
+                      onClick={() => downloadDocument(doc.id, doc.filename)}
+                    >
+                      View Document
+                    </button>
                   </li>
                 ))}
               </ul>
@@ -307,7 +428,7 @@ export default function TrialDetail({ user, onLogout }) {
                     onClick={approveAll}
                     disabled={criteriaBusy}
                   >
-                    Approve All High Confidence
+                    Approve All
                   </button>
                 </div>
               )}
@@ -401,14 +522,48 @@ export default function TrialDetail({ user, onLogout }) {
             <div className="p-4 text-sm text-slate-500">No amendments recorded.</div>
           ) : (
             <ul className="divide-y divide-slate-100">
-              {amendments.map((a) => (
-                <li className="p-4" key={a.id}>
-                  <div className="text-sm font-semibold">
-                    v{a.from_version} to v{a.to_version}
-                  </div>
-                  <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-fog p-3 text-xs text-slate-700">{a.summary}</pre>
-                </li>
-              ))}
+              {amendments.map((amendment) => {
+                const isExpanded = Boolean(expandedAmendments[amendment.id])
+                const linkedDoc = documentsByVersion[amendment.to_version]
+                return (
+                  <li className="p-4" key={amendment.id}>
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold">Version {amendment.to_version}</div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          Uploaded {new Date(amendment.uploaded_at).toLocaleString()} by {amendment.uploaded_by_email || amendment.uploaded_by}
+                        </div>
+                        <div className="mt-2 text-sm text-slate-700">{truncateSummary(amendment.summary)}</div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          className="rounded-lg border border-slate-300 px-3 py-1 text-xs"
+                          onClick={() => toggleAmendment(amendment.id)}
+                        >
+                          {isExpanded ? 'Hide Details' : 'Show Details'}
+                        </button>
+                        {linkedDoc ? (
+                          <button
+                            className="rounded-lg border border-slate-300 px-3 py-1 text-xs"
+                            onClick={() => downloadDocument(linkedDoc.id, linkedDoc.filename)}
+                          >
+                            View Document
+                          </button>
+                        ) : (
+                          <span className="rounded-lg border border-slate-200 px-3 py-1 text-xs text-slate-400">No document</span>
+                        )}
+                      </div>
+                    </div>
+
+                    {isExpanded && (
+                      <pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap rounded-lg bg-fog p-3 text-xs text-slate-700">
+                        {amendment.summary}
+                      </pre>
+                    )}
+                  </li>
+                )
+              })}
             </ul>
           )}
         </div>
@@ -420,10 +575,6 @@ export default function TrialDetail({ user, onLogout }) {
     }
 
     if (activeTab === 'Audit') {
-      if (!canAudit) {
-        return <div className="text-sm text-slate-600">Audit log is only available to owner and coordinator roles.</div>
-      }
-
       return (
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -458,7 +609,7 @@ export default function TrialDetail({ user, onLogout }) {
               <tbody>
                 {auditEntries.map((entry) => {
                   const trialResult = entry.screen_results?.[id]
-                  const criteria = Array.isArray(trialResult?.criteria) ? trialResult.criteria : []
+                  const entryCriteria = Array.isArray(trialResult?.criteria) ? trialResult.criteria : []
                   const isExpanded = Boolean(expandedAudit[entry.id])
                   return (
                     <tr className="border-t border-slate-100 align-top" key={entry.id}>
@@ -467,7 +618,7 @@ export default function TrialDetail({ user, onLogout }) {
                       <td className="px-4 py-3 uppercase">{entry.indication}</td>
                       <td className="px-4 py-3">{trialResult?.overall || '-'}</td>
                       <td className="px-4 py-3">
-                        {criteria.length === 0 ? (
+                        {entryCriteria.length === 0 ? (
                           '-'
                         ) : (
                           <div>
@@ -475,11 +626,11 @@ export default function TrialDetail({ user, onLogout }) {
                               className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
                               onClick={() => toggleAuditDetails(entry.id)}
                             >
-                              {isExpanded ? 'Hide' : 'Show'} ({criteria.length})
+                              {isExpanded ? 'Hide' : 'Show'} ({entryCriteria.length})
                             </button>
                             {isExpanded && (
                               <div className="mt-2 space-y-1 rounded-lg bg-fog p-2 text-xs">
-                                {criteria.map((criterion) => (
+                                {entryCriteria.map((criterion) => (
                                   <div key={`${entry.id}-${criterion.criterion_id}`}>
                                     {criterion.criterion_id}: {criterion.result}
                                   </div>
@@ -500,7 +651,7 @@ export default function TrialDetail({ user, onLogout }) {
       )
     }
 
-    return <Placeholder text="Phase 5" />
+    return null
   }, [
     activeTab,
     trial,
@@ -509,23 +660,29 @@ export default function TrialDetail({ user, onLogout }) {
     amendments,
     canUpload,
     canReview,
+    canAudit,
+    canArchive,
+    canDelete,
     criteria,
     reviewStatus,
     criteriaError,
     criteriaBusy,
-    canAudit,
     auditEntries,
     auditError,
     auditBusy,
     expandedAudit,
+    expandedAmendments,
     qaStatus,
-    id,
     user.role,
+    id,
+    trialBusy,
+    trialError,
+    documentsByVersion,
   ])
 
   return (
     <div>
-      <Nav user={user} onLogout={onLogout} />
+      <Nav onLogout={onLogout} />
       <main className="mx-auto max-w-6xl px-4 py-6">
         <h2 className="font-display text-2xl">{trial?.nickname || 'Trial Detail'}</h2>
 
@@ -601,14 +758,6 @@ function Card({ label, value }) {
     <div className="rounded-xl border border-slate-200 bg-white p-4">
       <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
       <p className="mt-1 text-sm font-semibold text-ink">{value}</p>
-    </div>
-  )
-}
-
-function Placeholder({ text }) {
-  return (
-    <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-500">
-      {text}
     </div>
   )
 }

@@ -8,9 +8,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "Trial Whisperer API"
+    app_version: str = Field(default="1.0.0", alias="APP_VERSION")
     environment: str = "development"
 
-    database_url: str = Field(default="postgresql+asyncpg://postgres:postgres@localhost:5432/trial_whisperer", alias="DATABASE_URL")
+    database_url: str = Field(default="postgresql+asyncpg://postgres:postgres@localhost:5432/trialwhisperer", alias="DATABASE_URL")
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
 
     secret_key: str = Field(default="change-me", alias="SECRET_KEY")
@@ -29,6 +30,10 @@ class Settings(BaseSettings):
     uploads_dir: str = "uploads"
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     qa_model: str = Field(default="gpt-4o-mini", alias="QA_MODEL")
+    embedding_model: str = Field(default="text-embedding-3-small", alias="EMBEDDING_MODEL")
+    initial_owner_email: str | None = Field(default=None, alias="INITIAL_OWNER_EMAIL")
+    initial_owner_password: str | None = Field(default=None, alias="INITIAL_OWNER_PASSWORD")
+    initial_owner_domain: str | None = Field(default=None, alias="INITIAL_OWNER_DOMAIN")
 
 
 @lru_cache

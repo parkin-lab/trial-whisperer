@@ -53,6 +53,11 @@ class TrialDocument(Base):
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     trial: Mapped[Trial] = relationship(back_populates="documents")
+    uploader: Mapped["User | None"] = relationship("User", foreign_keys=[uploaded_by], lazy="joined")
+
+    @property
+    def uploaded_by_email(self) -> str | None:
+        return getattr(self.uploader, "email", None)
 
 
 class TrialAmendment(Base):
@@ -65,6 +70,11 @@ class TrialAmendment(Base):
     summary: Mapped[str] = mapped_column(Text)
     uploaded_by: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"))
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    uploader: Mapped["User | None"] = relationship("User", foreign_keys=[uploaded_by], lazy="joined")
+
+    @property
+    def uploaded_by_email(self) -> str | None:
+        return getattr(self.uploader, "email", None)
 
 
 class TrialCriteria(Base):

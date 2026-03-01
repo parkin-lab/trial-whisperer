@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import Nav from '../components/Nav'
+import { useAuth } from '../context/AuthContext'
 import api from '../lib/api'
 
 const INDICATIONS = [
@@ -90,7 +91,8 @@ function formatNearMiss(nearMiss) {
   return `${nearMiss.actual_value} vs ${nearMiss.required_value} (delta ${nearMiss.delta.toFixed(2)})`
 }
 
-export default function Screener({ user, onLogout }) {
+export default function Screener({ onLogout }) {
+  const { user } = useAuth()
   const [indication, setIndication] = useState('aml')
   const [fieldsByIndication, setFieldsByIndication] = useState({})
   const [formState, setFormState] = useState({})
@@ -100,6 +102,10 @@ export default function Screener({ user, onLogout }) {
   const [expanded, setExpanded] = useState({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+
+  if (!user) {
+    return null
+  }
 
   useEffect(() => {
     api
@@ -173,7 +179,7 @@ export default function Screener({ user, onLogout }) {
 
   return (
     <div>
-      <Nav user={user} onLogout={onLogout} />
+      <Nav onLogout={onLogout} />
       <main className="mx-auto max-w-6xl px-4 py-6">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="font-display text-2xl">Eligibility Screener</h2>

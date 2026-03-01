@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
+import { Navigate } from 'react-router-dom'
 import Nav from '../components/Nav'
+import { useAuth } from '../context/AuthContext'
 import api from '../lib/api'
 
 const tabs = ['Users', 'Domain Allowlist', 'Audit Log', 'Stats']
@@ -23,7 +25,8 @@ function summarizeOverall(screenResults) {
   return summary.length > 0 ? summary.join(', ') : '-'
 }
 
-export default function Admin({ user, onLogout }) {
+export default function Admin({ onLogout }) {
+  const { user } = useAuth()
   const [activeTab, setActiveTab] = useState('Users')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -95,6 +98,10 @@ export default function Admin({ user, onLogout }) {
   }
 
   useEffect(() => {
+    if (!user || user.role !== 'owner') {
+      return
+    }
+
     const loadInitial = async () => {
       setBusy(true)
       setError('')
@@ -107,7 +114,7 @@ export default function Admin({ user, onLogout }) {
       }
     }
     loadInitial()
-  }, [])
+  }, [user])
 
   const setUserDraft = (userId, field, value) => {
     setUserDrafts((prev) => ({
@@ -246,9 +253,16 @@ export default function Admin({ user, onLogout }) {
     }
   }
 
+  if (!user) {
+    return null
+  }
+  if (user.role !== 'owner') {
+    return <Navigate to="/trials" replace />
+  }
+
   return (
     <div>
-      <Nav user={user} onLogout={onLogout} />
+      <Nav onLogout={onLogout} />
       <main className="mx-auto max-w-6xl px-4 py-6">
         <h2 className="font-display text-2xl">Admin</h2>
 

@@ -7,6 +7,7 @@ from uuid import UUID
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -163,7 +164,7 @@ async def update_trial(
 @router.post("/{trial_id}/archive", response_model=TrialRead)
 async def archive_trial(
     trial_id: UUID,
-    _: Annotated[User, Depends(require_role(UserRole.pi, UserRole.coordinator, UserRole.owner))],
+    _: Annotated[User, Depends(require_role(UserRole.pi, UserRole.owner))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> TrialRead:
     trial = await _get_trial_or_404(db, trial_id)
@@ -266,6 +267,28 @@ async def list_trial_documents(
         select(TrialDocument).where(TrialDocument.trial_id == trial_id).order_by(TrialDocument.version.desc())
     )
     return [TrialDocumentRead.model_validate(row) for row in result.scalars().all()]
+
+
+@router.get("/{trial_id}/documents/{document_id}/download")
+async def download_trial_document(
+    trial_id: UUID,
+    document_id: UUID,
+    _: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> FileResponse:
+    await _get_trial_or_404(db, trial_id)
+    result = await db.execute(
+        select(TrialDocument).where(TrialDocument.id == document_id, TrialDocument.trial_id == trial_id)
+    )
+    document = result.scalar_one_or_none()
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    file_path = Path(document.file_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document file not found")
+
+    return FileResponse(path=file_path, filename=document.filename, media_type="application/octet-stream")
 
 
 @router.post("/{trial_id}/amendments", response_model=TrialAmendmentRead, status_code=status.HTTP_201_CREATED)

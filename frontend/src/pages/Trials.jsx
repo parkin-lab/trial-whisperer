@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import Nav from '../components/Nav'
+import { useAuth } from '../context/AuthContext'
 import api from '../lib/api'
 
 const badgeClass = {
@@ -11,7 +12,8 @@ const badgeClass = {
 
 const canCreate = (role) => ['owner', 'pi', 'coordinator'].includes(role)
 
-export default function Trials({ user, onLogout }) {
+export default function Trials({ onLogout }) {
+  const { user } = useAuth()
   const [trials, setTrials] = useState([])
   const [status, setStatus] = useState('')
   const [indication, setIndication] = useState('')
@@ -23,6 +25,10 @@ export default function Trials({ user, onLogout }) {
     phase: '',
     sponsor: '',
   })
+
+  if (!user) {
+    return null
+  }
 
   const load = async () => {
     const params = {}
@@ -47,7 +53,7 @@ export default function Trials({ user, onLogout }) {
 
   return (
     <div>
-      <Nav user={user} onLogout={onLogout} />
+      <Nav onLogout={onLogout} />
       <main className="mx-auto max-w-6xl px-4 py-6">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
           <h2 className="font-display text-2xl">Trial Registry</h2>
