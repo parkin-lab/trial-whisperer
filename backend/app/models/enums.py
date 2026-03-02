@@ -23,6 +23,12 @@ class TrialStatus(StrEnum):
     archived = "archived"
 
 
+class TrialExtractionStatus(StrEnum):
+    processing = "processing"
+    ready = "ready"
+    needs_review = "needs_review"
+
+
 class CriteriaType(StrEnum):
     inclusion = "inclusion"
     exclusion = "exclusion"

@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
@@ -6,14 +7,14 @@ from uuid import UUID
 
 from arq import create_pool
 from arq.connections import RedisSettings
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_user, require_role
-from app.models.enums import Indication, JobStatus, TrialStatus, UserRole
+from app.models.enums import Indication, JobStatus, TrialExtractionStatus, TrialStatus, UserRole
 from app.models.trial import BackgroundJob, Trial, TrialAmendment, TrialCriteria, TrialDocument
 from app.models.user import User
 from app.schemas.trial import TrialAmendmentRead, TrialCreate, TrialDocumentRead, TrialRead, TrialUpdate
@@ -33,6 +34,18 @@ ALLOWED_SUFFIXES = {".pdf", ".docx"}
 
 def _is_allowed_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_SUFFIXES
+
+
+def _build_ctg_url(nct_id: str | None) -> str | None:
+    if not nct_id:
+        return None
+    return f"https://clinicaltrials.gov/study/{nct_id}"
+
+
+def _mark_extraction_processing(trial: Trial) -> None:
+    trial.extraction_status = TrialExtractionStatus.processing
+    trial.extraction_started_at = datetime.now(UTC)
+    trial.extraction_completed_at = None
 
 
 async def _get_trial_or_404(db: AsyncSession, trial_id: UUID) -> Trial:
@@ -104,11 +117,13 @@ async def create_trial(
 ) -> TrialRead:
     trial = Trial(
         nct_id=payload.nct_id,
+        ctg_url=payload.ctg_url or _build_ctg_url(payload.nct_id),
         nickname=payload.nickname,
         indication=payload.indication,
         phase=payload.phase,
         sponsor=payload.sponsor,
         status=TrialStatus.draft,
+        extraction_status=TrialExtractionStatus.needs_review,
         pi_id=payload.pi_id,
         coordinator_id=payload.coordinator_id,
         created_by=user.id,
@@ -116,6 +131,59 @@ async def create_trial(
     db.add(trial)
     await db.commit()
     await db.refresh(trial)
+    return TrialRead.model_validate(trial)
+
+
+@router.post("/create-with-upload", response_model=TrialRead, status_code=status.HTTP_201_CREATED)
+async def create_trial_with_upload(
+    nickname: Annotated[str, Form(min_length=1)],
+    protocol: Annotated[UploadFile, File(...)],
+    user: Annotated[User, Depends(require_role(UserRole.pi, UserRole.coordinator, UserRole.owner))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> TrialRead:
+    cleaned_nickname = nickname.strip()
+    if not cleaned_nickname:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Nickname is required")
+
+    trial = Trial(
+        nickname=cleaned_nickname,
+        status=TrialStatus.draft,
+        extraction_status=TrialExtractionStatus.processing,
+        extraction_started_at=datetime.now(UTC),
+        created_by=user.id,
+    )
+    db.add(trial)
+    await db.flush()
+
+    filename, file_path = await _save_upload(trial.id, 1, protocol)
+    doc = TrialDocument(
+        trial_id=trial.id,
+        version=1,
+        filename=filename,
+        file_path=file_path,
+        uploaded_by=user.id,
+    )
+    db.add(doc)
+    await db.flush()
+
+    parse_job = BackgroundJob(
+        type="parse_trial_document",
+        status=JobStatus.pending,
+        payload={"trial_id": str(trial.id), "document_id": str(doc.id), "file_path": file_path},
+    )
+    db.add(parse_job)
+    await db.commit()
+    await db.refresh(trial)
+    await db.refresh(parse_job)
+
+    if not await _enqueue_parse_job(parse_job.id):
+        parse_job.status = JobStatus.failed
+        parse_job.error = "Failed to enqueue job"
+        trial.extraction_status = TrialExtractionStatus.needs_review
+        trial.extraction_completed_at = datetime.now(UTC)
+        await db.commit()
+        await db.refresh(trial)
+
     return TrialRead.model_validate(trial)
 
 
@@ -155,23 +223,29 @@ async def update_trial(
 ) -> TrialRead:
     trial = await _get_trial_or_404(db, trial_id)
 
-    if payload.nickname is not None:
-        trial.nickname = payload.nickname
-    if payload.pi_id is not None:
-        trial.pi_id = payload.pi_id
-    if payload.coordinator_id is not None:
-        trial.coordinator_id = payload.coordinator_id
-    if payload.status is not None:
-        if payload.status == TrialStatus.active:
-            criteria_result = await db.execute(select(TrialCriteria).where(TrialCriteria.trial_id == trial_id))
-            criteria_rows = criteria_result.scalars().all()
-            blocking = [c for c in criteria_rows if c.approved_at is None and not c.manual_review_required]
-            if blocking:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"{len(blocking)} criteria must be approved before activating this trial",
-                )
-        trial.status = payload.status
+    updates = payload.model_dump(exclude_unset=True)
+    if "status" in updates and updates["status"] == TrialStatus.active:
+        indication_value = updates.get("indication", trial.indication)
+        if indication_value is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Cannot activate trial without indication",
+            )
+        criteria_result = await db.execute(select(TrialCriteria).where(TrialCriteria.trial_id == trial_id))
+        criteria_rows = criteria_result.scalars().all()
+        blocking = [c for c in criteria_rows if c.approved_at is None and not c.manual_review_required]
+        if blocking:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"{len(blocking)} criteria must be approved before activating this trial",
+            )
+
+    for field in {"nickname", "nct_id", "ctg_url", "indication", "phase", "sponsor", "pi_id", "coordinator_id", "status"}:
+        if field in updates:
+            setattr(trial, field, updates[field])
+
+    if "nct_id" in updates and "ctg_url" not in updates:
+        trial.ctg_url = _build_ctg_url(trial.nct_id)
 
     await db.commit()
     await db.refresh(trial)
@@ -198,6 +272,11 @@ async def activate_trial(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> TrialRead:
     trial = await _get_trial_or_404(db, trial_id)
+    if trial.indication is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Cannot activate trial without indication",
+        )
 
     criteria_result = await db.execute(select(TrialCriteria).where(TrialCriteria.trial_id == trial_id))
     criteria = criteria_result.scalars().all()
@@ -239,7 +318,7 @@ async def upload_trial_document(
     user: Annotated[User, Depends(require_role(UserRole.pi, UserRole.coordinator, UserRole.owner))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> TrialDocumentRead:
-    await _get_trial_or_404(db, trial_id)
+    trial = await _get_trial_or_404(db, trial_id)
     latest_doc_result = await db.execute(
         select(TrialDocument)
         .where(TrialDocument.trial_id == trial_id)
@@ -267,6 +346,7 @@ async def upload_trial_document(
         payload={"trial_id": str(trial_id), "document_id": str(doc.id), "file_path": file_path},
     )
     db.add(parse_job)
+    _mark_extraction_processing(trial)
 
     await db.commit()
     await db.refresh(doc)
@@ -276,6 +356,8 @@ async def upload_trial_document(
     if not await _enqueue_parse_job(parse_job.id):
         parse_job.status = JobStatus.failed
         parse_job.error = "Failed to enqueue job"
+        trial.extraction_status = TrialExtractionStatus.needs_review
+        trial.extraction_completed_at = datetime.now(UTC)
         jobs_to_update.append(parse_job)
 
     if jobs_to_update:
@@ -331,7 +413,7 @@ async def create_amendment(
     user: Annotated[User, Depends(require_role(UserRole.pi, UserRole.coordinator, UserRole.owner))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> TrialAmendmentRead:
-    await _get_trial_or_404(db, trial_id)
+    trial = await _get_trial_or_404(db, trial_id)
 
     latest_result = await db.execute(
         select(TrialDocument).where(TrialDocument.trial_id == trial_id).order_by(TrialDocument.version.desc())
@@ -376,6 +458,7 @@ async def create_amendment(
         payload={"trial_id": str(trial_id), "document_id": str(new_doc.id), "file_path": file_path},
     )
     db.add(parse_job)
+    _mark_extraction_processing(trial)
     await db.commit()
     await db.refresh(amendment)
     await db.refresh(parse_job)
@@ -384,6 +467,8 @@ async def create_amendment(
     if not await _enqueue_parse_job(parse_job.id):
         parse_job.status = JobStatus.failed
         parse_job.error = "Failed to enqueue job"
+        trial.extraction_status = TrialExtractionStatus.needs_review
+        trial.extraction_completed_at = datetime.now(UTC)
         jobs_to_update.append(parse_job)
 
     if jobs_to_update:

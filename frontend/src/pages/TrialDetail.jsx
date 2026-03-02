@@ -17,6 +17,12 @@ const approvalClass = {
   manual: 'bg-amber-100 text-amber-800',
 }
 
+const extractionStatusClass = {
+  processing: 'bg-sky-100 text-sky-800',
+  ready: 'bg-emerald-100 text-emerald-800',
+  needs_review: 'bg-amber-100 text-amber-800',
+}
+
 function truncateSummary(value, maxLength = 180) {
   if (!value) return ''
   if (value.length <= maxLength) return value
@@ -50,6 +56,17 @@ export default function TrialDetail({ onLogout }) {
   const [expandedAmendments, setExpandedAmendments] = useState({})
   const [trialBusy, setTrialBusy] = useState(false)
   const [trialError, setTrialError] = useState('')
+  const [metadataForm, setMetadataForm] = useState({
+    nickname: '',
+    nct_id: '',
+    ctg_url: '',
+    indication: '',
+    phase: '',
+    sponsor: '',
+  })
+  const [metadataBusy, setMetadataBusy] = useState(false)
+  const [metadataError, setMetadataError] = useState('')
+  const [metadataSaved, setMetadataSaved] = useState('')
 
   if (!user) {
     return null
@@ -60,6 +77,7 @@ export default function TrialDetail({ onLogout }) {
   const canAudit = ['owner', 'coordinator'].includes(user.role)
   const canArchive = ['owner', 'pi'].includes(user.role)
   const canDelete = user.role === 'owner'
+  const canEditMetadata = ['owner', 'pi', 'coordinator'].includes(user.role)
 
   const tabs = useMemo(() => {
     const available = ['Overview', 'Documents', 'Criteria', 'Amendments', 'Q&A']
@@ -127,6 +145,18 @@ export default function TrialDetail({ onLogout }) {
     }
   }, [activeTab, tabs])
 
+  useEffect(() => {
+    if (!trial) return
+    setMetadataForm({
+      nickname: trial.nickname || '',
+      nct_id: trial.nct_id || '',
+      ctg_url: trial.ctg_url || '',
+      indication: trial.indication || '',
+      phase: trial.phase || '',
+      sponsor: trial.sponsor || '',
+    })
+  }, [trial])
+
   const parseCriteria = async () => {
     setCriteriaBusy(true)
     setCriteriaError('')
@@ -193,6 +223,36 @@ export default function TrialDetail({ onLogout }) {
     } catch (err) {
       setTrialError(err.response?.data?.detail || 'Could not delete trial.')
       setTrialBusy(false)
+    }
+  }
+
+  const saveTrialMetadata = async () => {
+    if (!canEditMetadata) return
+    const nickname = metadataForm.nickname.trim()
+    if (!nickname) {
+      setMetadataError('Nickname is required.')
+      return
+    }
+
+    setMetadataBusy(true)
+    setMetadataError('')
+    setMetadataSaved('')
+    try {
+      const payload = {
+        nickname,
+        nct_id: metadataForm.nct_id.trim() || null,
+        ctg_url: metadataForm.ctg_url.trim() || null,
+        indication: metadataForm.indication || null,
+        phase: metadataForm.phase.trim() || null,
+        sponsor: metadataForm.sponsor.trim() || null,
+      }
+      const res = await api.patch(`/trials/${id}`, payload)
+      setTrial(res.data)
+      setMetadataSaved('Metadata updated.')
+    } catch (err) {
+      setMetadataError(err.response?.data?.detail || 'Could not update trial metadata.')
+    } finally {
+      setMetadataBusy(false)
     }
   }
 
@@ -338,17 +398,102 @@ export default function TrialDetail({ onLogout }) {
             </div>
           )}
 
-          <div className="grid gap-3 md:grid-cols-2">
-            <Card label="Nickname" value={trial.nickname} />
-            <Card label="NCT ID" value={trial.nct_id || '-'} />
-            <Card label="Indication" value={trial.indication} />
-            <Card label="Phase" value={trial.phase || '-'} />
-            <Card label="Sponsor" value={trial.sponsor || '-'} />
-            <Card label="Status" value={trial.status} />
-            <Card
-              label="Indexing"
-              value={qaStatus?.embeddings_exist ? `Indexed (${qaStatus.chunk_count} chunks)` : 'Pending'}
-            />
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 className="font-display text-lg">Trial Metadata</h4>
+              <span className={`badge ${extractionStatusClass[trial.extraction_status] || 'bg-slate-100 text-slate-700'}`}>
+                extraction: {trial.extraction_status}
+              </span>
+            </div>
+            {trial.extraction_status === 'processing' && (
+              <div className="mt-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800">
+                Metadata extraction is running from the latest protocol upload.
+              </div>
+            )}
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-slate-500">Nickname</p>
+                <input
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  value={metadataForm.nickname}
+                  onChange={(e) => setMetadataForm((previous) => ({ ...previous, nickname: e.target.value }))}
+                  disabled={!canEditMetadata || metadataBusy}
+                />
+              </div>
+              <div>
+                <p className="text-xs uppercase tracking-wide text-slate-500">NCT ID</p>
+                <input
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  value={metadataForm.nct_id}
+                  onChange={(e) => setMetadataForm((previous) => ({ ...previous, nct_id: e.target.value }))}
+                  disabled={!canEditMetadata || metadataBusy}
+                />
+              </div>
+              <div>
+                <p className="text-xs uppercase tracking-wide text-slate-500">CTG URL</p>
+                <input
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  value={metadataForm.ctg_url}
+                  onChange={(e) => setMetadataForm((previous) => ({ ...previous, ctg_url: e.target.value }))}
+                  disabled={!canEditMetadata || metadataBusy}
+                />
+              </div>
+              <div>
+                <p className="text-xs uppercase tracking-wide text-slate-500">Indication</p>
+                <select
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  value={metadataForm.indication}
+                  onChange={(e) => setMetadataForm((previous) => ({ ...previous, indication: e.target.value }))}
+                  disabled={!canEditMetadata || metadataBusy}
+                >
+                  <option value="">Unknown</option>
+                  <option value="aml">AML</option>
+                  <option value="all">ALL</option>
+                  <option value="lymphoma">Lymphoma</option>
+                  <option value="mm">MM</option>
+                  <option value="transplant">Transplant</option>
+                  <option value="gvhd">GVHD</option>
+                </select>
+              </div>
+              <div>
+                <p className="text-xs uppercase tracking-wide text-slate-500">Phase</p>
+                <input
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  value={metadataForm.phase}
+                  onChange={(e) => setMetadataForm((previous) => ({ ...previous, phase: e.target.value }))}
+                  disabled={!canEditMetadata || metadataBusy}
+                />
+              </div>
+              <div>
+                <p className="text-xs uppercase tracking-wide text-slate-500">Sponsor</p>
+                <input
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  value={metadataForm.sponsor}
+                  onChange={(e) => setMetadataForm((previous) => ({ ...previous, sponsor: e.target.value }))}
+                  disabled={!canEditMetadata || metadataBusy}
+                />
+              </div>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <Card label="Status" value={trial.status} />
+              <Card
+                label="Indexing"
+                value={qaStatus?.embeddings_exist ? `Indexed (${qaStatus.chunk_count} chunks)` : 'Pending'}
+              />
+            </div>
+            {canEditMetadata && (
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <button
+                  className="rounded-lg bg-ink px-4 py-2 text-sm text-white disabled:opacity-50"
+                  onClick={saveTrialMetadata}
+                  disabled={metadataBusy}
+                >
+                  {metadataBusy ? 'Saving...' : 'Save Metadata'}
+                </button>
+                {metadataSaved && <span className="text-sm text-emerald-700">{metadataSaved}</span>}
+                {metadataError && <span className="text-sm text-rose-700">{metadataError}</span>}
+              </div>
+            )}
           </div>
 
           <div className="rounded-xl border border-slate-200 bg-white p-4">
@@ -678,13 +823,25 @@ export default function TrialDetail({ onLogout }) {
     trialBusy,
     trialError,
     documentsByVersion,
+    canEditMetadata,
+    metadataForm,
+    metadataBusy,
+    metadataError,
+    metadataSaved,
   ])
 
   return (
     <div>
       <Nav onLogout={onLogout} />
       <main className="mx-auto max-w-6xl px-4 py-6">
-        <h2 className="font-display text-2xl">{trial?.nickname || 'Trial Detail'}</h2>
+        <div className="flex flex-wrap items-center gap-3">
+          <h2 className="font-display text-2xl">{trial?.nickname || 'Trial Detail'}</h2>
+          {trial?.extraction_status && (
+            <span className={`badge ${extractionStatusClass[trial.extraction_status] || 'bg-slate-100 text-slate-700'}`}>
+              {trial.extraction_status}
+            </span>
+          )}
+        </div>
 
         <div className="mt-4 flex flex-wrap gap-2">
           {tabs.map((tab) => (

@@ -1,9 +1,15 @@
 from collections.abc import AsyncGenerator
+import os
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
+
+# Ensure startup bootstrap doesn't run during tests
+os.environ.setdefault("INITIAL_OWNER_EMAIL", "")
+os.environ.setdefault("INITIAL_OWNER_PASSWORD", "")
+os.environ.setdefault("INITIAL_OWNER_DOMAIN", "")
 
 from app.database import Base, get_db
 from app.main import app

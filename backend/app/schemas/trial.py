@@ -5,13 +5,14 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.engine.evaluator import TrialResult
-from app.models.enums import ConfidenceLevel, CriteriaType, Indication, TrialStatus
+from app.models.enums import ConfidenceLevel, CriteriaType, Indication, TrialExtractionStatus, TrialStatus
 
 
 class TrialCreate(BaseModel):
     nct_id: str | None = None
+    ctg_url: str | None = None
     nickname: str
-    indication: Indication
+    indication: Indication | None = None
     phase: str | None = None
     sponsor: str | None = None
     pi_id: UUID | None = None
@@ -20,6 +21,11 @@ class TrialCreate(BaseModel):
 
 class TrialUpdate(BaseModel):
     nickname: str | None = None
+    nct_id: str | None = None
+    ctg_url: str | None = None
+    indication: Indication | None = None
+    phase: str | None = None
+    sponsor: str | None = None
     pi_id: UUID | None = None
     coordinator_id: UUID | None = None
     status: TrialStatus | None = None
@@ -30,11 +36,15 @@ class TrialRead(BaseModel):
 
     id: UUID
     nct_id: str | None
+    ctg_url: str | None
     nickname: str
-    indication: Indication
+    indication: Indication | None
     phase: str | None
     sponsor: str | None
     status: TrialStatus
+    extraction_status: TrialExtractionStatus
+    extraction_started_at: datetime | None
+    extraction_completed_at: datetime | None
     pi_id: UUID | None
     coordinator_id: UUID | None
     created_by: UUID

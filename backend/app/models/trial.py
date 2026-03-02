@@ -19,7 +19,7 @@ except ModuleNotFoundError:
             return f"vector({self.dim})"
 
 from app.database import Base
-from app.models.enums import ConfidenceLevel, CriteriaType, Indication, JobStatus, TrialStatus
+from app.models.enums import ConfidenceLevel, CriteriaType, Indication, JobStatus, TrialExtractionStatus, TrialStatus
 
 
 class Trial(Base):
@@ -27,11 +27,21 @@ class Trial(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     nct_id: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)
+    ctg_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     nickname: Mapped[str] = mapped_column(String(255), index=True)
-    indication: Mapped[Indication] = mapped_column(Enum(Indication, name="indication", native_enum=False))
+    indication: Mapped[Indication | None] = mapped_column(
+        Enum(Indication, name="indication", native_enum=False),
+        nullable=True,
+    )
     phase: Mapped[str | None] = mapped_column(String(64), nullable=True)
     sponsor: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[TrialStatus] = mapped_column(Enum(TrialStatus, name="trial_status", native_enum=False), default=TrialStatus.draft)
+    extraction_status: Mapped[TrialExtractionStatus] = mapped_column(
+        Enum(TrialExtractionStatus, name="trial_extraction_status", native_enum=False),
+        default=TrialExtractionStatus.needs_review,
+    )
+    extraction_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    extraction_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pi_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     coordinator_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_by: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="RESTRICT"))

@@ -44,6 +44,7 @@ async def create_ctg_snapshot(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
     trial.nct_id = payload.nct_id
+    trial.ctg_url = f"https://clinicaltrials.gov/study/{payload.nct_id}"
     snapshot = CtgSnapshot(trial_id=trial_id, nct_id=payload.nct_id, raw_json=raw)
     db.add(snapshot)
     await db.commit()
