@@ -58,6 +58,7 @@ export default function TrialDetail({ onLogout }) {
   const [trialError, setTrialError] = useState('')
   const [metadataForm, setMetadataForm] = useState({
     nickname: '',
+    trial_title: '',
     nct_id: '',
     ctg_url: '',
     indication: '',
@@ -149,6 +150,7 @@ export default function TrialDetail({ onLogout }) {
     if (!trial) return
     setMetadataForm({
       nickname: trial.nickname || '',
+      trial_title: trial.trial_title || '',
       nct_id: trial.nct_id || '',
       ctg_url: trial.ctg_url || '',
       indication: trial.indication || '',
@@ -240,6 +242,7 @@ export default function TrialDetail({ onLogout }) {
     try {
       const payload = {
         nickname,
+        trial_title: metadataForm.trial_title.trim() || null,
         nct_id: metadataForm.nct_id.trim() || null,
         ctg_url: metadataForm.ctg_url.trim() || null,
         indication: metadataForm.indication || null,
@@ -420,6 +423,15 @@ export default function TrialDetail({ onLogout }) {
                   disabled={!canEditMetadata || metadataBusy}
                 />
               </div>
+              <div className="md:col-span-2">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Trial Title</p>
+                <input
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  value={metadataForm.trial_title}
+                  onChange={(e) => setMetadataForm((previous) => ({ ...previous, trial_title: e.target.value }))}
+                  disabled={!canEditMetadata || metadataBusy}
+                />
+              </div>
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-500">NCT ID</p>
                 <input
@@ -437,6 +449,16 @@ export default function TrialDetail({ onLogout }) {
                   onChange={(e) => setMetadataForm((previous) => ({ ...previous, ctg_url: e.target.value }))}
                   disabled={!canEditMetadata || metadataBusy}
                 />
+                {trial.ctg_url && (
+                  <a
+                    className="mt-2 inline-flex text-xs text-sky-700 hover:underline"
+                    href={trial.ctg_url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open ClinicalTrials.gov record
+                  </a>
+                )}
               </div>
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-500">Indication</p>
@@ -472,6 +494,15 @@ export default function TrialDetail({ onLogout }) {
                   onChange={(e) => setMetadataForm((previous) => ({ ...previous, sponsor: e.target.value }))}
                   disabled={!canEditMetadata || metadataBusy}
                 />
+              </div>
+            </div>
+            <div className="mt-4 rounded-lg border border-slate-200 bg-fog p-3 text-sm text-slate-700">
+              <div>
+                <span className="font-medium">CTG match confidence:</span>{' '}
+                {typeof trial.ctg_match_confidence === 'number' ? trial.ctg_match_confidence.toFixed(2) : 'N/A'}
+              </div>
+              <div className="mt-1">
+                <span className="font-medium">CTG match note:</span> {trial.ctg_match_note || 'N/A'}
               </div>
             </div>
             <div className="mt-4 grid gap-3 md:grid-cols-2">

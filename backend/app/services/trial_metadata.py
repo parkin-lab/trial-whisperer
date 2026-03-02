@@ -13,6 +13,7 @@ Return only JSON object with keys:
 - indication: one of ["aml","all","lymphoma","mm","transplant","gvhd"] or null
 - nct_id: string like "NCT01234567" or null
 - ctg_url: full ClinicalTrials.gov study URL or null
+- trial_title: official or brief study title from the protocol text or null
 - sponsor: sponsor name or null
 - phase: phase text like "Phase 1", "Phase 2/3" or null
 
@@ -20,7 +21,23 @@ Never guess values that are not explicitly in the text."""
 
 NCT_ID_PATTERN = re.compile(r"\bNCT\d{8}\b", re.IGNORECASE)
 PHASE_PATTERN = re.compile(r"\bphase\s*([0-4ivx]+(?:/[0-4ivx]+)?[a-z]?)\b", re.IGNORECASE)
-SPONSOR_PATTERN = re.compile(r"(?:lead\s+sponsor|sponsor)\s*[:\-]\s*([^\n\r]{2,120})", re.IGNORECASE)
+SPONSOR_PATTERN = re.compile(
+    r"(?:lead\s+sponsor|study\s+sponsor|sponsored\s+by|sponsor|funded\s+by)\s*[:\-]?\s*([^\n\r]{2,180})",
+    re.IGNORECASE,
+)
+TITLE_HINT_PATTERN = re.compile(
+    r"(?im)^(?=.{25,500}$).*(?:\bA\s+Phase\b|\b(?:acute myeloid leukemia|acute lymphoblastic leukemia|lymphoma|multiple myeloma|gvhd|graft[-\s]versus[-\s]host disease|transplant)\b.*\b(?:study|trial)\b).*$"
+)
+GENERIC_TITLE_HEADINGS = {
+    "protocol",
+    "study protocol",
+    "clinical protocol",
+    "protocol synopsis",
+    "synopsis",
+    "table of contents",
+    "confidential",
+    "investigator brochure",
+}
 
 INDICATION_KEYWORDS: dict[Indication, tuple[str, ...]] = {
     Indication.aml: ("acute myeloid leukemia", " aml "),
@@ -37,6 +54,7 @@ class TrialMetadataExtraction:
     indication: Indication | None = None
     nct_id: str | None = None
     ctg_url: str | None = None
+    trial_title: str | None = None
     sponsor: str | None = None
     phase: str | None = None
 
@@ -89,6 +107,38 @@ def _build_ctg_url(nct_id: str | None) -> str | None:
     return f"https://clinicaltrials.gov/study/{nct_id}"
 
 
+def _normalize_title_candidate(value: str) -> str | None:
+    cleaned = re.sub(r"\s+", " ", value).strip(" -:\t\r\n")
+    if not cleaned:
+        return None
+    return cleaned[:500]
+
+
+def _looks_generic_heading(value: str) -> bool:
+    lowered = value.lower().strip()
+    compact = re.sub(r"[^a-z0-9 ]", "", lowered)
+    if compact in GENERIC_TITLE_HEADINGS:
+        return True
+    return compact.startswith("version ") or compact.startswith("page ")
+
+
+def _extract_fallback_title(text: str) -> str | None:
+    lines = [line.strip() for line in text.splitlines()]
+
+    for line in lines:
+        candidate = _normalize_title_candidate(line)
+        if candidate is None or len(candidate) < 25:
+            continue
+        if _looks_generic_heading(candidate):
+            continue
+        return candidate
+
+    match = TITLE_HINT_PATTERN.search(text)
+    if match:
+        return _normalize_title_candidate(match.group(0))
+    return None
+
+
 def _extract_fallback_metadata(text: str) -> TrialMetadataExtraction:
     haystack = f" {text.lower()} "
     indication = None
@@ -104,12 +154,14 @@ def _extract_fallback_metadata(text: str) -> TrialMetadataExtraction:
     phase = _phase_label(phase_match.group(1).upper() if phase_match else None)
 
     sponsor_match = SPONSOR_PATTERN.search(text)
-    sponsor = sponsor_match.group(1).strip(" .") if sponsor_match else None
+    sponsor = sponsor_match.group(1).strip(" .;:-") if sponsor_match else None
+    trial_title = _extract_fallback_title(text)
 
     return TrialMetadataExtraction(
         indication=indication,
         nct_id=nct_id,
         ctg_url=_build_ctg_url(nct_id),
+        trial_title=trial_title,
         sponsor=sponsor,
         phase=phase,
     )
@@ -122,6 +174,7 @@ def _merge_metadata(primary: TrialMetadataExtraction, fallback: TrialMetadataExt
         indication=primary.indication or fallback.indication,
         nct_id=nct_id,
         ctg_url=ctg_url,
+        trial_title=primary.trial_title or fallback.trial_title,
         sponsor=primary.sponsor or fallback.sponsor,
         phase=primary.phase or fallback.phase,
     )
@@ -148,6 +201,7 @@ async def extract_trial_metadata_from_text(text: str) -> TrialMetadataExtraction
         indication=_parse_indication(payload.get("indication")),
         nct_id=_normalize_nct_id(payload.get("nct_id")),
         ctg_url=(payload.get("ctg_url") or None),
+        trial_title=(str(payload.get("trial_title")).strip() if payload.get("trial_title") else None),
         sponsor=(str(payload.get("sponsor")).strip() if payload.get("sponsor") else None),
         phase=_phase_label(str(payload.get("phase")).strip() if payload.get("phase") else None),
     )

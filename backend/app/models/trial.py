@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.sqltypes import JSON
 from sqlalchemy.types import UserDefinedType
@@ -28,6 +28,9 @@ class Trial(Base):
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     nct_id: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)
     ctg_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    trial_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    ctg_match_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ctg_match_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     nickname: Mapped[str] = mapped_column(String(255), index=True)
     indication: Mapped[Indication | None] = mapped_column(
         Enum(Indication, name="indication", native_enum=False),

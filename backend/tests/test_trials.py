@@ -150,6 +150,7 @@ async def test_metadata_extraction_worker_transitions_to_ready(db_session, monke
             indication=Indication.aml,
             nct_id="NCT12345678",
             ctg_url="https://clinicaltrials.gov/study/NCT12345678",
+            trial_title="A Phase 2 Study of New Agent in AML",
             sponsor="Trial Sponsor",
             phase="Phase 2",
         )
@@ -170,8 +171,154 @@ async def test_metadata_extraction_worker_transitions_to_ready(db_session, monke
 
     assert updated_trial.indication == Indication.aml
     assert updated_trial.nct_id == "NCT12345678"
+    assert updated_trial.trial_title == "A Phase 2 Study of New Agent in AML"
     assert updated_trial.sponsor == "Trial Sponsor"
     assert updated_trial.phase == "Phase 2"
     assert updated_trial.extraction_status == TrialExtractionStatus.ready
     assert updated_trial.extraction_completed_at is not None
     assert updated_job.status == JobStatus.completed
+
+
+async def test_ctg_title_fallback_auto_fills_nct_when_confidence_high(db_session, monkeypatch):
+    user = await _create_user(db_session, email="pi4@example.com", role=UserRole.pi)
+    trial = Trial(
+        nickname="Fallback Trial",
+        status=TrialStatus.draft,
+        extraction_status=TrialExtractionStatus.processing,
+        created_by=user.id,
+    )
+    db_session.add(trial)
+    await db_session.flush()
+
+    doc = TrialDocument(
+        trial_id=trial.id,
+        version=1,
+        filename="protocol.pdf",
+        file_path="/tmp/protocol-fallback.pdf",
+        uploaded_by=user.id,
+    )
+    db_session.add(doc)
+    await db_session.flush()
+
+    job = BackgroundJob(
+        type="parse_trial_document",
+        status=JobStatus.pending,
+        payload={"trial_id": str(trial.id), "document_id": str(doc.id), "file_path": doc.file_path},
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    testing_session_factory = async_sessionmaker(db_session.bind, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(tasks, "AsyncSessionLocal", testing_session_factory)
+
+    async def _download_file(file_path):
+        del file_path
+        return b"pdf bytes", "protocol.pdf"
+
+    async def _extract_metadata(text):
+        del text
+        return TrialMetadataExtraction(
+            indication=Indication.aml,
+            sponsor="City of Hope",
+            phase="Phase 2",
+            trial_title="A Phase 2 Study of CAR-T in Acute Myeloid Leukemia",
+        )
+
+    async def _search_studies(query):
+        assert query == "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia"
+        return [
+            {
+                "nctId": "NCT77778888",
+                "officialTitle": "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia",
+                "phase": "Phase 2",
+                "sponsor": "City of Hope",
+            }
+        ]
+
+    monkeypatch.setattr(tasks, "storage_download_file", _download_file)
+    monkeypatch.setattr(tasks, "get_local_path_for_extraction", lambda file_path, contents: file_path)
+    monkeypatch.setattr(tasks, "extract_text", lambda _: "mock protocol text")
+    monkeypatch.setattr(tasks, "extract_trial_metadata_from_text", _extract_metadata)
+    monkeypatch.setattr(tasks, "search_studies", _search_studies)
+
+    await tasks.parse_trial_document({}, str(job.id))
+
+    updated_trial = (await db_session.execute(select(Trial).where(Trial.id == trial.id))).scalar_one()
+
+    assert updated_trial.nct_id == "NCT77778888"
+    assert updated_trial.ctg_url == "https://clinicaltrials.gov/study/NCT77778888"
+    assert updated_trial.ctg_match_confidence == pytest.approx(1.0)
+    assert updated_trial.ctg_match_note == "Auto-matched from title search"
+    assert updated_trial.extraction_status == TrialExtractionStatus.ready
+
+
+async def test_ctg_title_fallback_low_confidence_needs_manual_review(db_session, monkeypatch):
+    user = await _create_user(db_session, email="pi5@example.com", role=UserRole.pi)
+    trial = Trial(
+        nickname="Fallback Low Confidence Trial",
+        status=TrialStatus.draft,
+        extraction_status=TrialExtractionStatus.processing,
+        created_by=user.id,
+    )
+    db_session.add(trial)
+    await db_session.flush()
+
+    doc = TrialDocument(
+        trial_id=trial.id,
+        version=1,
+        filename="protocol.pdf",
+        file_path="/tmp/protocol-fallback-low.pdf",
+        uploaded_by=user.id,
+    )
+    db_session.add(doc)
+    await db_session.flush()
+
+    job = BackgroundJob(
+        type="parse_trial_document",
+        status=JobStatus.pending,
+        payload={"trial_id": str(trial.id), "document_id": str(doc.id), "file_path": doc.file_path},
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    testing_session_factory = async_sessionmaker(db_session.bind, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(tasks, "AsyncSessionLocal", testing_session_factory)
+
+    async def _download_file(file_path):
+        del file_path
+        return b"pdf bytes", "protocol.pdf"
+
+    async def _extract_metadata(text):
+        del text
+        return TrialMetadataExtraction(
+            indication=Indication.aml,
+            sponsor="City of Hope",
+            phase="Phase 2",
+            trial_title="A Phase 2 Study of CAR-T in Acute Myeloid Leukemia",
+        )
+
+    async def _search_studies(query):
+        assert query == "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia"
+        return [
+            {
+                "nctId": "NCT00001111",
+                "officialTitle": "Observational Registry for Long-Term Outcomes in Solid Tumors",
+                "phase": "Phase 1",
+                "sponsor": "Another Sponsor",
+            }
+        ]
+
+    monkeypatch.setattr(tasks, "storage_download_file", _download_file)
+    monkeypatch.setattr(tasks, "get_local_path_for_extraction", lambda file_path, contents: file_path)
+    monkeypatch.setattr(tasks, "extract_text", lambda _: "mock protocol text")
+    monkeypatch.setattr(tasks, "extract_trial_metadata_from_text", _extract_metadata)
+    monkeypatch.setattr(tasks, "search_studies", _search_studies)
+
+    await tasks.parse_trial_document({}, str(job.id))
+
+    updated_trial = (await db_session.execute(select(Trial).where(Trial.id == trial.id))).scalar_one()
+
+    assert updated_trial.nct_id is None
+    assert updated_trial.ctg_match_confidence == pytest.approx(0.0)
+    assert updated_trial.ctg_match_note == "Candidate found; manual review recommended"
+    assert updated_trial.extraction_status == TrialExtractionStatus.needs_review

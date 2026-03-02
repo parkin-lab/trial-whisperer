@@ -118,6 +118,9 @@ async def create_trial(
     trial = Trial(
         nct_id=payload.nct_id,
         ctg_url=payload.ctg_url or _build_ctg_url(payload.nct_id),
+        trial_title=payload.trial_title,
+        ctg_match_confidence=payload.ctg_match_confidence,
+        ctg_match_note=payload.ctg_match_note,
         nickname=payload.nickname,
         indication=payload.indication,
         phase=payload.phase,
@@ -240,7 +243,20 @@ async def update_trial(
                 detail=f"{len(blocking)} criteria must be approved before activating this trial",
             )
 
-    for field in {"nickname", "nct_id", "ctg_url", "indication", "phase", "sponsor", "pi_id", "coordinator_id", "status"}:
+    for field in {
+        "nickname",
+        "nct_id",
+        "ctg_url",
+        "trial_title",
+        "ctg_match_confidence",
+        "ctg_match_note",
+        "indication",
+        "phase",
+        "sponsor",
+        "pi_id",
+        "coordinator_id",
+        "status",
+    }:
         if field in updates:
             setattr(trial, field, updates[field])
 

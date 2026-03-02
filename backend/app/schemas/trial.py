@@ -11,6 +11,9 @@ from app.models.enums import ConfidenceLevel, CriteriaType, Indication, TrialExt
 class TrialCreate(BaseModel):
     nct_id: str | None = None
     ctg_url: str | None = None
+    trial_title: str | None = None
+    ctg_match_confidence: float | None = None
+    ctg_match_note: str | None = None
     nickname: str
     indication: Indication | None = None
     phase: str | None = None
@@ -23,6 +26,9 @@ class TrialUpdate(BaseModel):
     nickname: str | None = None
     nct_id: str | None = None
     ctg_url: str | None = None
+    trial_title: str | None = None
+    ctg_match_confidence: float | None = None
+    ctg_match_note: str | None = None
     indication: Indication | None = None
     phase: str | None = None
     sponsor: str | None = None
@@ -37,6 +43,9 @@ class TrialRead(BaseModel):
     id: UUID
     nct_id: str | None
     ctg_url: str | None
+    trial_title: str | None
+    ctg_match_confidence: float | None
+    ctg_match_note: str | None
     nickname: str
     indication: Indication | None
     phase: str | None

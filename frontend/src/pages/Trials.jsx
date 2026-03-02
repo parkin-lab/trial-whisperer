@@ -18,6 +18,12 @@ const extractionStatusBadgeClass = {
 
 const canCreate = (role) => ['owner', 'pi', 'coordinator'].includes(role)
 
+const truncateText = (value, maxLength = 72) => {
+  if (!value) return ''
+  if (value.length <= maxLength) return value
+  return `${value.slice(0, maxLength)}...`
+}
+
 export default function Trials({ onLogout }) {
   const { user } = useAuth()
   const [trials, setTrials] = useState([])
@@ -133,10 +139,12 @@ export default function Trials({ onLogout }) {
             <thead className="bg-slate-50 text-left text-slate-600">
               <tr>
                 <th className="px-4 py-3">Nickname</th>
+                <th className="px-4 py-3">Trial Title</th>
                 <th className="px-4 py-3">NCT ID</th>
                 <th className="px-4 py-3">Indication</th>
                 <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3">Extraction</th>
+                <th className="px-4 py-3">CTG Match</th>
                 <th className="px-4 py-3">PI</th>
                 <th className="px-4 py-3">Coordinator</th>
                 <th className="px-4 py-3">Created</th>
@@ -150,6 +158,9 @@ export default function Trials({ onLogout }) {
                       {trial.nickname}
                     </Link>
                   </td>
+                  <td className="max-w-md px-4 py-3 text-slate-700" title={trial.trial_title || ''}>
+                    {trial.trial_title ? truncateText(trial.trial_title) : '-'}
+                  </td>
                   <td className="px-4 py-3">{trial.nct_id || '-'}</td>
                   <td className="px-4 py-3">{trial.indication ? trial.indication.toUpperCase() : '-'}</td>
                   <td className="px-4 py-3">
@@ -159,6 +170,13 @@ export default function Trials({ onLogout }) {
                     <span className={`badge ${extractionStatusBadgeClass[trial.extraction_status] || 'bg-slate-100'}`}>
                       {trial.extraction_status}
                     </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    {typeof trial.ctg_match_confidence === 'number' ? (
+                      <span className="badge bg-sky-100 text-sky-800">{trial.ctg_match_confidence.toFixed(2)}</span>
+                    ) : (
+                      '-'
+                    )}
                   </td>
                   <td className="px-4 py-3 text-xs text-slate-600">{trial.pi_id || '-'}</td>
                   <td className="px-4 py-3 text-xs text-slate-600">{trial.coordinator_id || '-'}</td>
