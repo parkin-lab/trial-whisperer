@@ -23,3 +23,4 @@ pgvector==0.4.1
 aiosqlite==0.21.0
 pytest==8.4.1
 pytest-asyncio==1.1.0
+psycopg2-binary>=2.9
