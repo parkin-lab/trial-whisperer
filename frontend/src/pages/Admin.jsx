@@ -142,15 +142,15 @@ export default function Admin({ onLogout }) {
     }
   }
 
-  const deactivateUser = async (userId) => {
-    setUserDraft(userId, 'active', false)
+  const setUserActive = async (userId, active) => {
+    setUserDraft(userId, 'active', active)
     setBusy(true)
     setError('')
     try {
-      await api.patch(`/admin/users/${userId}`, { active: false })
+      await api.patch(`/admin/users/${userId}`, { active })
       await loadUsers()
     } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to deactivate user.')
+      setError(err.response?.data?.detail || `Failed to ${active ? 'approve' : 'deactivate'} user.`)
     } finally {
       setBusy(false)
     }
@@ -331,12 +331,22 @@ export default function Admin({ onLogout }) {
                           <button className="rounded-lg border border-slate-300 px-3 py-1" onClick={() => saveUser(row.id)}>
                             Save
                           </button>
-                          <button
-                            className="rounded-lg border border-rose-300 px-3 py-1 text-rose-700"
-                            onClick={() => deactivateUser(row.id)}
-                          >
-                            Deactivate
-                          </button>
+                          {!row.active && (
+                            <button
+                              className="rounded-lg border border-emerald-300 px-3 py-1 text-emerald-700"
+                              onClick={() => setUserActive(row.id, true)}
+                            >
+                              Approve
+                            </button>
+                          )}
+                          {row.active && (
+                            <button
+                              className="rounded-lg border border-rose-300 px-3 py-1 text-rose-700"
+                              onClick={() => setUserActive(row.id, false)}
+                            >
+                              Deactivate
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>

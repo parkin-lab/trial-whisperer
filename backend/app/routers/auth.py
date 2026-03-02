@@ -16,13 +16,11 @@ from app.services.auth import (
     TokenError,
     create_access_token,
     create_refresh_token,
-    create_verification_token,
     decode_token,
     extract_domain,
     hash_password,
     verify_password,
 )
-from app.services.email import send_verification_email
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -51,10 +49,7 @@ async def register(payload: RegisterRequest, db: Annotated[AsyncSession, Depends
     await db.commit()
     await db.refresh(user)
 
-    token = create_verification_token(user.id)
-    await send_verification_email(user.email, token)
-
-    return AuthMessage(message="Registered successfully. Check email to verify your account.")
+    return AuthMessage(message="Registered successfully. Your account is pending owner approval.")
 
 
 @router.post("/verify", response_model=AuthMessage)
@@ -89,7 +84,7 @@ async def login(request: Request, payload: LoginRequest, db: Annotated[AsyncSess
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     if not user.active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not verified")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account pending owner approval")
 
     return TokenPair(
         access_token=create_access_token(user.id),

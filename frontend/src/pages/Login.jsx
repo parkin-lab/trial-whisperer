@@ -19,7 +19,7 @@ export default function Login({ onLogin }) {
     try {
       if (mode === 'register') {
         await api.post('/auth/register', { email, password, name })
-        setInfo('Check email to verify your account before login.')
+        setInfo('Account created. An owner must approve your account before you can log in.')
         setMode('login')
       } else {
         await onLogin(email, password)
