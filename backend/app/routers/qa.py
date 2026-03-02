@@ -1,71 +1,63 @@
-import logging
+"""
+Protocol Q&A using Claude via OpenClaw gateway.
+Passes full protocol text as context (no embeddings/RAG needed - Claude has long context).
+"""
+from __future__ import annotations
+
+import os
+import tempfile
+from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_user
-from app.models.trial import Trial
+from app.models.trial import Trial, TrialDocument
 from app.models.user import User
-from app.services.rag import (
-    ChunkResult,
-    EmbeddingStatus,
-    MissingVoyageDependencyError,
-    MissingVoyageKeyError,
-    SearchProtocolResult,
-    get_embedding_status,
-    search_protocol,
-)
-
-try:
-    import anthropic
-except ModuleNotFoundError:
-    anthropic = None
+from app.schemas.trial import QARequest, QAResponse
+from app.services.documents import extract_text
+from app.services.llm import chat_completion
+from app.services.storage import download_file
 
 router = APIRouter(tags=["qa"])
 settings = get_settings()
-logger = logging.getLogger(__name__)
+
+SYSTEM_PROMPT = """You are a clinical trial protocol assistant. Answer questions about the trial protocol strictly based on the provided protocol text.
+
+Rules:
+- Only use information present in the protocol text
+- If the information is not in the protocol, say so explicitly
+- Quote relevant sections to support your answer
+- Be precise about dosing, timing, and eligibility criteria
+- Do not make assumptions or extrapolate beyond the text"""
 
 
-class QARequest(BaseModel):
-    question: str = Field(min_length=1, max_length=5000)
-    document_version: int | None = None
+async def _get_latest_protocol_text(trial_id: UUID, db: AsyncSession) -> str | None:
+    """Get text content of the latest protocol document for a trial."""
+    result = await db.execute(
+        select(TrialDocument).where(TrialDocument.trial_id == trial_id).order_by(TrialDocument.version.desc())
+    )
+    doc = result.scalars().first()
+    if doc is None:
+        return None
 
-    @field_validator("question")
-    @classmethod
-    def validate_question(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("Question cannot be empty")
-        return cleaned
-
-
-class QAResponse(BaseModel):
-    answer: str | None
-    sources: list[ChunkResult]
-    embeddings_pending: bool
-    model: str
-
-
-async def _ensure_trial_exists(db: AsyncSession, trial_id: UUID) -> None:
-    result = await db.execute(select(Trial.id).where(Trial.id == trial_id))
-    if result.scalar_one_or_none() is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trial not found")
-
-
-@router.get("/trials/{trial_id}/qa/status", response_model=EmbeddingStatus)
-async def protocol_qa_status(
-    trial_id: UUID,
-    _: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> EmbeddingStatus:
-    await _ensure_trial_exists(db, trial_id)
-    return await get_embedding_status(str(trial_id), db)
+    try:
+        contents, _ = await download_file(doc.file_path)
+        suffix = Path(doc.file_path).suffix
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(contents)
+            temp_path = tmp.name
+        try:
+            return extract_text(temp_path)
+        finally:
+            os.unlink(temp_path)
+    except Exception:
+        return None
 
 
 @router.post("/trials/{trial_id}/qa", response_model=QAResponse)
@@ -75,99 +67,59 @@ async def protocol_qa(
     _: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> QAResponse:
-    await _ensure_trial_exists(db, trial_id)
+    result = await db.execute(select(Trial).where(Trial.id == trial_id))
+    trial = result.scalar_one_or_none()
+    if trial is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trial not found")
 
-    if not settings.anthropic_api_key:
+    protocol_text = await _get_latest_protocol_text(trial_id, db)
+    if not protocol_text:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="ANTHROPIC_API_KEY is not configured. Protocol Q&A is unavailable.",
-        )
-    if anthropic is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="anthropic package is not installed. Protocol Q&A is unavailable.",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No protocol document found for this trial",
         )
 
-    try:
-        search_result: SearchProtocolResult = await search_protocol(
-            trial_id=str(trial_id),
-            query=payload.question,
-            document_version=payload.document_version,
-            top_k=5,
-            db=db,
-        )
-    except MissingVoyageKeyError:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="VOYAGE_API_KEY is not configured. Protocol Q&A is unavailable.",
-        )
-    except MissingVoyageDependencyError:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="voyageai package is not installed. Protocol Q&A is unavailable.",
-        )
-    except Exception:
-        logger.exception("Protocol similarity search failed", extra={"trial_id": str(trial_id)})
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Protocol search failed. Please try again.",
-        )
-
-    if search_result.embeddings_pending:
-        return QAResponse(
-            answer=None,
-            sources=[],
-            embeddings_pending=True,
-            model=settings.qa_model,
-        )
-
-    chunks = search_result.chunks
-    if not chunks:
-        return QAResponse(
-            answer="The information is not present in the indexed protocol excerpts.",
-            sources=[],
-            embeddings_pending=False,
-            model=settings.qa_model,
-        )
-
-    excerpts_text = "\n\n".join(f"[{idx}] {chunk.chunk_text}" for idx, chunk in enumerate(chunks, start=1))
-
-    try:
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        message = client.messages.create(
-            model=settings.qa_model,
-            max_tokens=1024,
-            system=(
-                "You are a clinical trial protocol assistant. Answer questions about the trial protocol strictly "
-                "based on the provided excerpts. Do not invent information not present in the excerpts. "
-                "Always cite which excerpt number supports your answer. "
-                "If the information is not present, say so explicitly."
-            ),
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        f"Protocol excerpts:\n{excerpts_text}\n\n"
-                        f"Question: {payload.question}\n\n"
-                        "Answer based only on the excerpts above."
-                    ),
-                }
-            ],
-        )
-    except Exception:
-        logger.exception("Protocol QA completion failed", extra={"trial_id": str(trial_id)})
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Protocol Q&A completion failed. Please try again.",
-        )
-
-    answer_text = (message.content[0].text or "").strip()
-    if not answer_text:
-        answer_text = "The information is not present in the indexed protocol excerpts."
-
-    return QAResponse(
-        answer=answer_text,
-        sources=chunks,
-        embeddings_pending=False,
+    answer = await chat_completion(
+        messages=[
+            {
+                "role": "user",
+                "content": f"Protocol text:\n\n{protocol_text[:150000]}\n\n---\n\nQuestion: {payload.question}",
+            }
+        ],
+        system=SYSTEM_PROMPT,
+        max_tokens=1024,
         model=settings.qa_model,
     )
+
+    if answer is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="LLM service unavailable - check OPENCLAW_GATEWAY_TOKEN",
+        )
+
+    return QAResponse(
+        answer=answer,
+        sources=[],
+        embeddings_pending=False,
+        model="openclaw-gateway",
+    )
+
+
+@router.get("/trials/{trial_id}/qa/status")
+async def qa_status(
+    trial_id: UUID,
+    _: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    result = await db.execute(
+        select(TrialDocument).where(TrialDocument.trial_id == trial_id).order_by(TrialDocument.version.desc())
+    )
+    doc = result.scalars().first()
+    return {
+        "embeddings_exist": False,
+        "chunk_count": 0,
+        "document_version": doc.version if doc else None,
+        "embeddings_pending": False,
+        "qa_available": doc is not None,
+        "mode": "full-context",
+    }

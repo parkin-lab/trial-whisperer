@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.engine.schema import validate_expression
-from app.models.enums import ConfidenceLevel, CriteriaType, UserRole
+from app.models.enums import ConfidenceLevel, UserRole
 from app.models.trial import Trial, TrialCriteria, TrialDocument
 from app.models.user import User
 from app.schemas.trial import CriteriaReviewStatusRead, TrialCriterionRead, TrialCriterionUpdate
@@ -77,14 +77,13 @@ async def parse_trial_criteria(
 
     rows: list[TrialCriteria] = []
     for item in parsed:
-        item_type = item.get("type", "inclusion")
-        type_value = CriteriaType.exclusion if item_type == "exclusion" else CriteriaType.inclusion
-        text_value = str(item.get("text", "")).strip()
+        type_value = item.type
+        text_value = item.text.strip()
         if not text_value:
             continue
-        confidence_value = ConfidenceLevel.high if item.get("confidence") == "high" else ConfidenceLevel.needs_review
-        expression_value = item.get("expression")
-        manual_review_required = confidence_value == ConfidenceLevel.needs_review
+        confidence_value = item.confidence
+        expression_value = item.expression
+        manual_review_required = item.manual_review_required
 
         try:
             validate_expression(expression_value)

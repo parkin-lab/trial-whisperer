@@ -2,8 +2,6 @@
 
 ## Prerequisites
 - Docker + Docker Compose
-- Anthropic API key (optional — criteria parsing and Q&A disabled without it)
-- Voyage AI API key (optional — document RAG search disabled without it)
 
 ## Quick Start
 
@@ -11,7 +9,7 @@
 2. Copy and configure env:
    cp .env.example .env
    # Edit .env: set SECRET_KEY, INITIAL_OWNER_EMAIL/PASSWORD/DOMAIN
-   # Optionally add ANTHROPIC_API_KEY and VOYAGE_API_KEY
+   # Add OPENCLAW_GATEWAY_TOKEN (see LLM Setup below)
 
 3. Start everything:
    docker compose up -d
@@ -30,6 +28,16 @@ Use the INITIAL_OWNER_EMAIL and INITIAL_OWNER_PASSWORD you set in .env.
 - API docs: http://localhost:8000/docs
 - pgAdmin (dev): http://localhost:5050 (admin@example.com / admin)
   Start with: docker compose --profile dev up -d
+
+## LLM Setup
+Trial Whisperer uses Claude via your local OpenClaw gateway - no separate API keys needed.
+
+1. Get your OpenClaw gateway token:
+   cat ~/.openclaw/openclaw.json | python3 -c "import json,sys; c=json.load(sys.stdin); print(c['gateway']['auth']['token'])"
+
+2. Add to your .env:
+   OPENCLAW_GATEWAY_TOKEN=<token from above>
+   OPENCLAW_GATEWAY_URL=http://host.docker.internal:18789
 
 ## External Access (optional)
 To expose via public HTTPS URL using Cloudflare Tunnel:

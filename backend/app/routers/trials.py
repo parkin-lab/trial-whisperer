@@ -53,19 +53,6 @@ async def _enqueue_parse_job(job_id: UUID) -> bool:
     return await _enqueue_worker_job("parse_trial_document", str(job_id), extra={"job_id": str(job_id)})
 
 
-async def _enqueue_embed_job(trial_id: UUID, document_version: int, file_path: str, job_id: UUID | None = None) -> bool:
-    extra = {"trial_id": str(trial_id), "document_version": document_version}
-    if job_id is not None:
-        extra["job_id"] = str(job_id)
-    return await _enqueue_worker_job(
-        "embed_protocol_document",
-        str(trial_id),
-        document_version,
-        file_path,
-        extra=extra,
-    )
-
-
 async def _enqueue_worker_job(name: str, *args: object, extra: dict | None = None) -> bool:
     pool = None
     try:
@@ -281,29 +268,15 @@ async def upload_trial_document(
     )
     db.add(parse_job)
 
-    embed_job = BackgroundJob(
-        type="embed_protocol_document",
-        status=JobStatus.pending,
-        payload={"trial_id": str(trial_id), "document_version": next_version},
-    )
-    db.add(embed_job)
-
     await db.commit()
     await db.refresh(doc)
     await db.refresh(parse_job)
-    await db.refresh(embed_job)
 
     jobs_to_update: list[BackgroundJob] = []
     if not await _enqueue_parse_job(parse_job.id):
         parse_job.status = JobStatus.failed
         parse_job.error = "Failed to enqueue job"
         jobs_to_update.append(parse_job)
-
-    if not await _enqueue_embed_job(trial_id, next_version, file_path, embed_job.id):
-        embed_job.status = JobStatus.failed
-        embed_job.error = "Failed to enqueue job"
-        jobs_to_update.append(embed_job)
-        logger.warning("Failed to enqueue embed job", extra={"trial_id": str(trial_id)})
 
     if jobs_to_update:
         await db.commit()
@@ -403,28 +376,15 @@ async def create_amendment(
         payload={"trial_id": str(trial_id), "document_id": str(new_doc.id), "file_path": file_path},
     )
     db.add(parse_job)
-    embed_job = BackgroundJob(
-        type="embed_protocol_document",
-        status=JobStatus.pending,
-        payload={"trial_id": str(trial_id), "document_version": next_version},
-    )
-    db.add(embed_job)
     await db.commit()
     await db.refresh(amendment)
     await db.refresh(parse_job)
-    await db.refresh(embed_job)
 
     jobs_to_update: list[BackgroundJob] = []
     if not await _enqueue_parse_job(parse_job.id):
         parse_job.status = JobStatus.failed
         parse_job.error = "Failed to enqueue job"
         jobs_to_update.append(parse_job)
-
-    if not await _enqueue_embed_job(trial_id, next_version, file_path, embed_job.id):
-        embed_job.status = JobStatus.failed
-        embed_job.error = "Failed to enqueue job"
-        jobs_to_update.append(embed_job)
-        logger.warning("Failed to enqueue embed job", extra={"trial_id": str(trial_id)})
 
     if jobs_to_update:
         await db.commit()

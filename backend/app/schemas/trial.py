@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.engine.evaluator import TrialResult
 from app.models.enums import ConfidenceLevel, CriteriaType, Indication, TrialStatus
@@ -118,6 +118,26 @@ class CriteriaReviewStatusRead(BaseModel):
     approved: int
     needs_review: int
     blocking_count: int
+
+
+class QARequest(BaseModel):
+    question: str = Field(min_length=1, max_length=5000)
+    document_version: int | None = None
+
+    @field_validator("question")
+    @classmethod
+    def validate_question(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Question cannot be empty")
+        return cleaned
+
+
+class QAResponse(BaseModel):
+    answer: str | None
+    sources: list[dict[str, Any]]
+    embeddings_pending: bool
+    model: str
 
 
 class ScreeningRequest(BaseModel):
