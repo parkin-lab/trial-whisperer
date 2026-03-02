@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
@@ -17,6 +18,7 @@ from app.models.user import User
 from app.schemas.trial import CriteriaReviewStatusRead, TrialCriterionRead, TrialCriterionUpdate
 from app.services.criteria_parser import parse_criteria_from_text
 from app.services.documents import extract_text
+from app.services.storage import download_file as storage_download_file, get_local_path_for_extraction
 
 ENGINE_RULE_VERSION = "1.0.0"
 
@@ -56,7 +58,16 @@ async def parse_trial_criteria(
     if latest_doc is None:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No protocol document uploaded")
 
-    text = extract_text(latest_doc.file_path)
+    contents, _ = await storage_download_file(latest_doc.file_path)
+    tmp_path = get_local_path_for_extraction(latest_doc.file_path, contents)
+    try:
+        text = extract_text(tmp_path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+
     if not text.strip():
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Could not extract text from document")
 

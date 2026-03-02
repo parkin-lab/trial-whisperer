@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 from datetime import UTC, datetime
 from urllib.parse import urlparse
@@ -12,6 +13,7 @@ from app.database import AsyncSessionLocal
 from app.models.enums import JobStatus
 from app.models.trial import BackgroundJob, ProtocolEmbedding
 from app.services.documents import extract_text
+from app.services.storage import download_file as storage_download_file, get_local_path_for_extraction
 
 try:
     from openai import AsyncOpenAI
@@ -150,7 +152,12 @@ async def embed_protocol_document(ctx: dict, trial_id: str, document_version: in
         )
         return
 
-    text = extract_text(file_path)
+    contents, _ = await storage_download_file(file_path)
+    tmp_path = get_local_path_for_extraction(file_path, contents)
+    try:
+        text = extract_text(tmp_path)
+    finally:
+        os.unlink(tmp_path)
     chunks = _sentence_chunks(text=text, target_tokens=500, overlap_tokens=50)
 
     if not chunks:

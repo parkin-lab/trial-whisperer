@@ -28,6 +28,9 @@ class Settings(BaseSettings):
 
     frontend_url: str = Field(default="http://localhost:5173", alias="FRONTEND_URL")
     uploads_dir: str = "uploads"
+    supabase_url: str | None = Field(default=None, alias="SUPABASE_URL")
+    supabase_service_key: str | None = Field(default=None, alias="SUPABASE_SERVICE_KEY")
+    supabase_storage_bucket: str = Field(default="protocols", alias="SUPABASE_STORAGE_BUCKET")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     qa_model: str = Field(default="gpt-4o-mini", alias="QA_MODEL")
     embedding_model: str = Field(default="text-embedding-3-small", alias="EMBEDDING_MODEL")

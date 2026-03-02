@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -68,7 +69,8 @@ async def _create_initial_owner_if_needed() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Path(settings.uploads_dir).mkdir(parents=True, exist_ok=True)
-    if settings.secret_key in {"change-me", "changeme", "secret", ""}:
+    # Only enforce in production (Railway sets RAILWAY_ENVIRONMENT)
+    if settings.secret_key in {"change-me", "changeme", "secret", ""} and os.getenv("RAILWAY_ENVIRONMENT"):
         raise RuntimeError("SECRET_KEY must be set to a secure random value before starting the application.")
     await _create_initial_owner_if_needed()
     yield

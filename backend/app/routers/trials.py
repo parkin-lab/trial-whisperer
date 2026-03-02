@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
@@ -7,7 +8,6 @@ from uuid import UUID
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
-from fastapi.responses import FileResponse
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,11 @@ from app.models.trial import BackgroundJob, Trial, TrialAmendment, TrialCriteria
 from app.models.user import User
 from app.schemas.trial import TrialAmendmentRead, TrialCreate, TrialDocumentRead, TrialRead, TrialUpdate
 from app.services.documents import extract_text, summarize_diff
+from app.services.storage import (
+    download_file as storage_download_file,
+    get_local_path_for_extraction,
+    upload_file as storage_upload_file,
+)
 
 router = APIRouter(prefix="/trials", tags=["trials"])
 settings = get_settings()
@@ -92,13 +97,6 @@ async def _save_upload(trial_id: UUID, version: int, upload: UploadFile) -> tupl
     if not upload.filename or not _is_allowed_file(upload.filename):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Only PDF and DOCX uploads are allowed")
 
-    trial_dir = Path(settings.uploads_dir) / str(trial_id)
-    trial_dir.mkdir(parents=True, exist_ok=True)
-
-    safe_name = upload.filename.replace("/", "_").replace("..", "_")
-    target_name = f"v{version}_{safe_name}"
-    target_path = trial_dir / target_name
-
     MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
     contents = await upload.read(MAX_UPLOAD_BYTES + 1)
     if len(contents) > MAX_UPLOAD_BYTES:
@@ -106,8 +104,10 @@ async def _save_upload(trial_id: UUID, version: int, upload: UploadFile) -> tupl
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail="File too large (max 50 MB)",
         )
-    target_path.write_bytes(contents)
-    return safe_name, str(target_path)
+
+    safe_name = Path(upload.filename).name.replace(" ", "_")
+    storage_path = await storage_upload_file(str(trial_id), version, safe_name, contents)
+    return safe_name, storage_path
 
 
 @router.post("", response_model=TrialRead, status_code=status.HTTP_201_CREATED)
@@ -331,7 +331,7 @@ async def download_trial_document(
     document_id: UUID,
     _: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> FileResponse:
+) -> Response:
     await _get_trial_or_404(db, trial_id)
     result = await db.execute(
         select(TrialDocument).where(TrialDocument.id == document_id, TrialDocument.trial_id == trial_id)
@@ -340,11 +340,16 @@ async def download_trial_document(
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    file_path = Path(document.file_path)
-    if not file_path.exists():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document file not found")
+    try:
+        contents, filename = await storage_download_file(document.file_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document file not found") from None
 
-    return FileResponse(path=file_path, filename=document.filename, media_type="application/octet-stream")
+    return Response(
+        content=contents,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/{trial_id}/amendments", response_model=TrialAmendmentRead, status_code=status.HTTP_201_CREATED)
@@ -376,8 +381,20 @@ async def create_amendment(
     db.add(new_doc)
     await db.flush()
 
-    old_text = extract_text(latest_doc.file_path)
-    new_text = extract_text(file_path)
+    old_contents, _ = await storage_download_file(latest_doc.file_path)
+    new_contents, _ = await storage_download_file(file_path)
+    old_tmp_path = get_local_path_for_extraction(latest_doc.file_path, old_contents)
+    new_tmp_path = get_local_path_for_extraction(file_path, new_contents)
+    try:
+        old_text = extract_text(old_tmp_path)
+        new_text = extract_text(new_tmp_path)
+    finally:
+        for tmp_path in (old_tmp_path, new_tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+
     summary = summarize_diff(old_text, new_text)
 
     amendment = TrialAmendment(
