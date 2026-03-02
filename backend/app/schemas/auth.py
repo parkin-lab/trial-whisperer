@@ -12,6 +12,10 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class VerifyRequest(BaseModel):
+    token: str = Field(min_length=8)
+
+
 class TokenPair(BaseModel):
     access_token: str
     refresh_token: str

@@ -78,6 +78,7 @@ async def parse_trial_criteria(
             expression_payload = item.expression
         except Exception:
             expression_payload = {"op": "is_true", "field": "manual_review_placeholder"}
+            item.manual_review_required = True
 
         row = TrialCriteria(
             trial_id=trial_id,
@@ -220,5 +221,11 @@ async def criteria_review_status(
         total=len(rows),
         approved=sum(1 for item in rows if item.approved_at is not None),
         needs_review=sum(1 for item in rows if item.confidence == ConfidenceLevel.needs_review),
-        blocking_count=sum(1 for item in rows if item.approved_at is None and not item.manual_review_required),
+        blocking_count=sum(
+            1
+            for item in rows
+            if item.approved_at is None
+            and item.confidence == ConfidenceLevel.needs_review
+            and not item.manual_review_required
+        ),
     )

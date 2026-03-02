@@ -4,13 +4,15 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.middleware.logging import JsonLoggingMiddleware
 from app.models.enums import UserRole
 from app.models.user import DomainAllowlist, User
+from app.rate_limiter import RateLimitExceeded, _rate_limit_exceeded_handler, limiter
 from app.routers import admin, audit, auth, criteria, ctg, qa, screener, trials
 from app.services.auth import extract_domain, hash_password
 
@@ -32,24 +34,32 @@ async def _create_initial_owner_if_needed() -> None:
     configured_domain = (settings.initial_owner_domain or owner_domain).lower().strip()
 
     async with AsyncSessionLocal() as session:
-        existing_user_count = int(await session.scalar(select(func.count()).select_from(User)) or 0)
-        if existing_user_count > 0:
-            return
-
-        owner = User(
-            email=owner_email,
-            name="Initial Owner",
-            hashed_password=hash_password(settings.initial_owner_password),
-            role=UserRole.owner,
-            active=True,
-            domain=owner_domain,
+        stmt = (
+            pg_insert(User)
+            .values(
+                email=owner_email,
+                name="Initial Owner",
+                hashed_password=hash_password(settings.initial_owner_password),
+                role=UserRole.owner,
+                active=True,
+                domain=owner_domain,
+            )
+            .on_conflict_do_nothing(index_elements=["email"])
+            .returning(User.id)
         )
-        session.add(owner)
-        await session.flush()
+        result = await session.execute(stmt)
+        owner_id = result.scalar_one_or_none()
+        if owner_id is None:
+            return
 
         for domain in {configured_domain, owner_domain}:
             if domain:
-                session.add(DomainAllowlist(domain=domain, added_by=owner.id))
+                allowlist_stmt = (
+                    pg_insert(DomainAllowlist)
+                    .values(domain=domain, added_by=owner_id)
+                    .on_conflict_do_nothing(index_elements=["domain"])
+                )
+                await session.execute(allowlist_stmt)
 
         await session.commit()
         logger.info("Created initial owner account", extra={"email": owner_email, "domain": configured_domain})
@@ -58,11 +68,15 @@ async def _create_initial_owner_if_needed() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Path(settings.uploads_dir).mkdir(parents=True, exist_ok=True)
+    if settings.secret_key in {"change-me", "changeme", "secret", ""}:
+        raise RuntimeError("SECRET_KEY must be set to a secure random value before starting the application.")
     await _create_initial_owner_if_needed()
     yield
 
 
 app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,

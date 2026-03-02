@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.sqltypes import JSON
 from sqlalchemy.types import UserDefinedType
@@ -35,14 +35,19 @@ class Trial(Base):
     pi_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     coordinator_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_by: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="RESTRICT"))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
 
     documents: Mapped[list["TrialDocument"]] = relationship(back_populates="trial", cascade="all, delete-orphan")
 
 
 class TrialDocument(Base):
     __tablename__ = "trial_documents"
+    __table_args__ = (UniqueConstraint("trial_id", "version", name="uq_trial_document_version"),)
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     trial_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("trials.id", ondelete="CASCADE"), index=True)
@@ -50,7 +55,7 @@ class TrialDocument(Base):
     filename: Mapped[str] = mapped_column(String(255))
     file_path: Mapped[str] = mapped_column(String(500))
     uploaded_by: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"))
-    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     trial: Mapped[Trial] = relationship(back_populates="documents")
     uploader: Mapped["User | None"] = relationship("User", foreign_keys=[uploaded_by], lazy="joined")
@@ -69,7 +74,7 @@ class TrialAmendment(Base):
     to_version: Mapped[int] = mapped_column(Integer)
     summary: Mapped[str] = mapped_column(Text)
     uploaded_by: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"))
-    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     uploader: Mapped["User | None"] = relationship("User", foreign_keys=[uploaded_by], lazy="joined")
 
     @property
@@ -100,7 +105,7 @@ class CtgSnapshot(Base):
     trial_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("trials.id", ondelete="CASCADE"), index=True)
     nct_id: Mapped[str] = mapped_column(String(32), index=True)
     raw_json: Mapped[dict] = mapped_column(JSON)
-    pulled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    pulled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
 class ProtocolEmbedding(Base):
@@ -121,6 +126,6 @@ class BackgroundJob(Base):
     type: Mapped[str] = mapped_column(String(100), index=True)
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus, name="job_status", native_enum=False), default=JobStatus.pending)
     payload: Mapped[dict] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

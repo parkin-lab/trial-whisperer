@@ -39,21 +39,31 @@ async def _get_trial_or_404(db: AsyncSession, trial_id: UUID) -> Trial:
     return trial
 
 
-async def _enqueue_parse_job(job_id: UUID) -> None:
-    await _enqueue_worker_job("parse_trial_document", str(job_id), extra={"job_id": str(job_id)})
+def _to_trial_document_read(document: TrialDocument) -> TrialDocumentRead:
+    payload = TrialDocumentRead.model_validate(document).model_dump()
+    payload["download_url"] = f"/trials/{document.trial_id}/documents/{document.id}/download"
+    return TrialDocumentRead.model_validate(payload)
 
 
-async def _enqueue_embed_job(trial_id: UUID, document_version: int, file_path: str) -> None:
-    await _enqueue_worker_job(
+async def _enqueue_parse_job(job_id: UUID) -> bool:
+    return await _enqueue_worker_job("parse_trial_document", str(job_id), extra={"job_id": str(job_id)})
+
+
+async def _enqueue_embed_job(trial_id: UUID, document_version: int, file_path: str, job_id: UUID | None = None) -> bool:
+    extra = {"trial_id": str(trial_id), "document_version": document_version}
+    if job_id is not None:
+        extra["job_id"] = str(job_id)
+    return await _enqueue_worker_job(
         "embed_protocol_document",
         str(trial_id),
         document_version,
         file_path,
-        extra={"trial_id": str(trial_id), "document_version": document_version},
+        extra=extra,
     )
 
 
-async def _enqueue_worker_job(name: str, *args: object, extra: dict | None = None) -> None:
+async def _enqueue_worker_job(name: str, *args: object, extra: dict | None = None) -> bool:
+    pool = None
     try:
         if hasattr(RedisSettings, "from_dsn"):
             redis_settings = RedisSettings.from_dsn(settings.redis_url)
@@ -68,10 +78,14 @@ async def _enqueue_worker_job(name: str, *args: object, extra: dict | None = Non
             )
         pool = await create_pool(redis_settings)
         await pool.enqueue_job(name, *args)
-        await pool.aclose()
+        return True
     except Exception:
         context = extra or {}
         logger.exception("Failed to enqueue ARQ job", extra={"job_name": name, **context})
+        return False
+    finally:
+        if pool is not None:
+            await pool.aclose()
 
 
 async def _save_upload(trial_id: UUID, version: int, upload: UploadFile) -> tuple[str, str]:
@@ -85,7 +99,13 @@ async def _save_upload(trial_id: UUID, version: int, upload: UploadFile) -> tupl
     target_name = f"v{version}_{safe_name}"
     target_path = trial_dir / target_name
 
-    contents = await upload.read()
+    MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+    contents = await upload.read(MAX_UPLOAD_BYTES + 1)
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="File too large (max 50 MB)",
+        )
     target_path.write_bytes(contents)
     return safe_name, str(target_path)
 
@@ -155,6 +175,17 @@ async def update_trial(
         trial.pi_id = payload.pi_id
     if payload.coordinator_id is not None:
         trial.coordinator_id = payload.coordinator_id
+    if payload.status is not None:
+        if payload.status == TrialStatus.active:
+            criteria_result = await db.execute(select(TrialCriteria).where(TrialCriteria.trial_id == trial_id))
+            criteria_rows = criteria_result.scalars().all()
+            blocking = [c for c in criteria_rows if c.approved_at is None and not c.manual_review_required]
+            if blocking:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"{len(blocking)} criteria must be approved before activating this trial",
+                )
+        trial.status = payload.status
 
     await db.commit()
     await db.refresh(trial)
@@ -223,11 +254,14 @@ async def upload_trial_document(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> TrialDocumentRead:
     await _get_trial_or_404(db, trial_id)
-    latest_result = await db.execute(
-        select(TrialDocument).where(TrialDocument.trial_id == trial_id).order_by(TrialDocument.version.desc())
+    latest_doc_result = await db.execute(
+        select(TrialDocument)
+        .where(TrialDocument.trial_id == trial_id)
+        .order_by(TrialDocument.version.desc())
+        .with_for_update()
     )
-    latest = latest_result.scalars().first()
-    next_version = 1 if latest is None else latest.version + 1
+    latest_doc = latest_doc_result.scalars().first()
+    next_version = (latest_doc.version + 1) if latest_doc else 1
 
     filename, file_path = await _save_upload(trial_id, next_version, upload)
 
@@ -241,19 +275,41 @@ async def upload_trial_document(
     db.add(doc)
     await db.flush()
 
-    job = BackgroundJob(
+    parse_job = BackgroundJob(
         type="parse_trial_document",
         status=JobStatus.pending,
         payload={"trial_id": str(trial_id), "document_id": str(doc.id), "file_path": file_path},
     )
-    db.add(job)
+    db.add(parse_job)
+
+    embed_job = BackgroundJob(
+        type="embed_protocol_document",
+        status=JobStatus.pending,
+        payload={"trial_id": str(trial_id), "document_version": next_version},
+    )
+    db.add(embed_job)
+
     await db.commit()
     await db.refresh(doc)
-    await db.refresh(job)
+    await db.refresh(parse_job)
+    await db.refresh(embed_job)
 
-    await _enqueue_parse_job(job.id)
-    await _enqueue_embed_job(trial_id, next_version, file_path)
-    return TrialDocumentRead.model_validate(doc)
+    jobs_to_update: list[BackgroundJob] = []
+    if not await _enqueue_parse_job(parse_job.id):
+        parse_job.status = JobStatus.failed
+        parse_job.error = "Failed to enqueue job"
+        jobs_to_update.append(parse_job)
+
+    if not await _enqueue_embed_job(trial_id, next_version, file_path, embed_job.id):
+        embed_job.status = JobStatus.failed
+        embed_job.error = "Failed to enqueue job"
+        jobs_to_update.append(embed_job)
+        logger.warning("Failed to enqueue embed job", extra={"trial_id": str(trial_id)})
+
+    if jobs_to_update:
+        await db.commit()
+
+    return _to_trial_document_read(doc)
 
 
 @router.get("/{trial_id}/documents", response_model=list[TrialDocumentRead])
@@ -266,7 +322,7 @@ async def list_trial_documents(
     result = await db.execute(
         select(TrialDocument).where(TrialDocument.trial_id == trial_id).order_by(TrialDocument.version.desc())
     )
-    return [TrialDocumentRead.model_validate(row) for row in result.scalars().all()]
+    return [_to_trial_document_read(row) for row in result.scalars().all()]
 
 
 @router.get("/{trial_id}/documents/{document_id}/download")
@@ -318,6 +374,7 @@ async def create_amendment(
         uploaded_by=user.id,
     )
     db.add(new_doc)
+    await db.flush()
 
     old_text = extract_text(latest_doc.file_path)
     new_text = extract_text(file_path)
@@ -331,8 +388,37 @@ async def create_amendment(
         uploaded_by=user.id,
     )
     db.add(amendment)
+    parse_job = BackgroundJob(
+        type="parse_trial_document",
+        status=JobStatus.pending,
+        payload={"trial_id": str(trial_id), "document_id": str(new_doc.id), "file_path": file_path},
+    )
+    db.add(parse_job)
+    embed_job = BackgroundJob(
+        type="embed_protocol_document",
+        status=JobStatus.pending,
+        payload={"trial_id": str(trial_id), "document_version": next_version},
+    )
+    db.add(embed_job)
     await db.commit()
     await db.refresh(amendment)
+    await db.refresh(parse_job)
+    await db.refresh(embed_job)
+
+    jobs_to_update: list[BackgroundJob] = []
+    if not await _enqueue_parse_job(parse_job.id):
+        parse_job.status = JobStatus.failed
+        parse_job.error = "Failed to enqueue job"
+        jobs_to_update.append(parse_job)
+
+    if not await _enqueue_embed_job(trial_id, next_version, file_path, embed_job.id):
+        embed_job.status = JobStatus.failed
+        embed_job.error = "Failed to enqueue job"
+        jobs_to_update.append(embed_job)
+        logger.warning("Failed to enqueue embed job", extra={"trial_id": str(trial_id)})
+
+    if jobs_to_update:
+        await db.commit()
 
     return TrialAmendmentRead.model_validate(amendment)
 

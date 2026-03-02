@@ -22,6 +22,7 @@ class TrialUpdate(BaseModel):
     nickname: str | None = None
     pi_id: UUID | None = None
     coordinator_id: UUID | None = None
+    status: TrialStatus | None = None
 
 
 class TrialRead(BaseModel):
@@ -48,7 +49,7 @@ class TrialDocumentRead(BaseModel):
     trial_id: UUID
     version: int
     filename: str
-    file_path: str
+    download_url: str | None = None
     uploaded_by: UUID
     uploaded_by_email: str | None = None
     uploaded_at: datetime

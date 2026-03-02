@@ -113,12 +113,18 @@ def _evaluate_comparison(expr: ComparisonExpr, patient_data: dict[str, Any]) -> 
             actual_norm = float(actual_value)
             required_norm = float(required_value)
 
-        return EvaluationResult.MET if _comparison(actual_norm, required_norm, expr.op) else EvaluationResult.NOT_MET
+        try:
+            return EvaluationResult.MET if _comparison(actual_norm, required_norm, expr.op) else EvaluationResult.NOT_MET
+        except TypeError:
+            return EvaluationResult.MANUAL_REVIEW
 
     if expr.unit and patient_data.get(f"{expr.field}_unit") and patient_data.get(f"{expr.field}_unit") != expr.unit:
         return EvaluationResult.MANUAL_REVIEW
 
-    return EvaluationResult.MET if _comparison(actual_value, required_value, expr.op) else EvaluationResult.NOT_MET
+    try:
+        return EvaluationResult.MET if _comparison(actual_value, required_value, expr.op) else EvaluationResult.NOT_MET
+    except TypeError:
+        return EvaluationResult.MANUAL_REVIEW
 
 
 def _evaluate_boolean(expr: BooleanExpr, patient_data: dict[str, Any]) -> EvaluationResult:
@@ -172,7 +178,9 @@ def _evaluate_temporal(expr: TemporalExpr, patient_data: dict[str, Any]) -> Eval
         return EvaluationResult.MANUAL_REVIEW
 
     now = datetime.now(UTC)
-    delta_days = abs((now - observed).total_seconds()) / 86400
+    if observed > now:
+        return EvaluationResult.MANUAL_REVIEW
+    delta_days = (now - observed).total_seconds() / 86400
     return EvaluationResult.MET if delta_days <= expr.days else EvaluationResult.NOT_MET
 
 
@@ -328,7 +336,10 @@ def _overall(results: list[CriterionResult]) -> EvaluationResult:
 
 
 def evaluate_trial(
-    trial_criteria: list[CriterionLike], patient_data: dict[str, Any], trial_id: str | None = None
+    trial_criteria: list[CriterionLike],
+    patient_data: dict[str, Any],
+    trial_id: str | None = None,
+    trial_name: str | None = None,
 ) -> TrialResult:
     if not trial_criteria:
         return TrialResult(
@@ -336,12 +347,14 @@ def evaluate_trial(
             overall=EvaluationResult.MANUAL_REVIEW,
             criteria_results=[],
             version_hash=_criteria_hash([]),
+            trial_name=trial_name,
         )
 
     resolved_trial_id = trial_id or str(trial_criteria[0].trial_id)
     criteria_results = [_criterion_result(criterion, patient_data) for criterion in trial_criteria]
     return TrialResult(
         trial_id=resolved_trial_id,
+        trial_name=trial_name,
         overall=_overall(criteria_results),
         criteria_results=criteria_results,
         version_hash=_criteria_hash(trial_criteria),
@@ -368,11 +381,12 @@ def evaluate_all_trials(trials_with_criteria: list[Any], patient_data: dict[str,
                 trial_id_override = str(item.trial_id)
             trial_name = getattr(item, "trial_name", None)
 
-        trial_result = evaluate_trial(criteria, patient_data)
-        if trial_id_override is not None:
-            trial_result.trial_id = trial_id_override
-        if trial_name:
-            trial_result.trial_name = trial_name
+        trial_result = evaluate_trial(
+            criteria,
+            patient_data,
+            trial_id=trial_id_override,
+            trial_name=trial_name,
+        )
         results.append(trial_result)
 
     return results

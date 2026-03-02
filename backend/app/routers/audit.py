@@ -8,7 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -63,24 +63,10 @@ def _to_read(row: AuditLog, user_email: str | None) -> AuditLogRead:
     )
 
 
-def _with_pagination(
-    rows: list[tuple[AuditLog, str | None]],
-    limit: int | None,
-    offset: int | None,
-) -> list[tuple[AuditLog, str | None]]:
-    if limit is None and offset is None:
-        return rows
-    start = offset or 0
-    if limit is None:
-        return rows[start:]
-    return rows[start : start + limit]
-
-
-async def _fetch_rows(
-    db: AsyncSession,
+def _filtered_query(
     user: User,
     filters: AuditLogFilters,
-) -> list[tuple[AuditLog, str | None]]:
+) -> tuple:
     from_dt = _as_datetime(filters.from_date, end_of_day=False)
     to_dt = _as_datetime(filters.to_date, end_of_day=True)
 
@@ -89,25 +75,43 @@ async def _fetch_rows(
         .outerjoin(User, User.id == AuditLog.user_id)
         .order_by(AuditLog.timestamp.desc())
     )
+    count_query = select(func.count()).select_from(AuditLog)
+
+    conditions = []
     if user.role == UserRole.coordinator:
-        query = query.where(AuditLog.user_id == user.id)
+        conditions.append(AuditLog.user_id == user.id)
     if filters.user_id:
-        query = query.where(AuditLog.user_id == filters.user_id)
+        conditions.append(AuditLog.user_id == filters.user_id)
     if filters.indication:
-        query = query.where(AuditLog.indication == filters.indication)
+        conditions.append(AuditLog.indication == filters.indication)
     if from_dt:
-        query = query.where(AuditLog.timestamp >= from_dt)
+        conditions.append(AuditLog.timestamp >= from_dt)
     if to_dt:
-        query = query.where(AuditLog.timestamp <= to_dt)
-
-    result = await db.execute(query)
-    rows = [(audit_row, email) for audit_row, email in result.all()]
-
+        conditions.append(AuditLog.timestamp <= to_dt)
     if filters.trial_id:
-        trial_key = str(filters.trial_id)
-        rows = [(audit_row, email) for audit_row, email in rows if trial_key in (audit_row.screen_results or {})]
+        conditions.append(cast(AuditLog.screen_results, String).contains(str(filters.trial_id)))
 
-    return rows
+    if conditions:
+        query = query.where(*conditions)
+        count_query = count_query.where(*conditions)
+
+    if filters.limit is not None:
+        query = query.limit(filters.limit)
+    if filters.offset is not None:
+        query = query.offset(filters.offset)
+
+    return query, count_query
+
+
+async def _fetch_rows(
+    db: AsyncSession,
+    user: User,
+    filters: AuditLogFilters,
+) -> tuple[list[tuple[AuditLog, str | None]], int]:
+    query, count_query = _filtered_query(user, filters)
+    result = await db.execute(query)
+    total = int(await db.scalar(count_query) or 0)
+    return [(audit_row, email) for audit_row, email in result.all()], total
 
 
 @router.get("", response_model=AuditLogListResponse)
@@ -130,13 +134,13 @@ async def list_audit_logs(
         from_date=from_date,
         to_date=to_date,
         trial_id=trial_id,
+        limit=limit,
+        offset=offset,
     )
-    rows = await _fetch_rows(db, user, filters)
-    total = len(rows)
-    paged = _with_pagination(rows, limit=limit, offset=offset)
+    rows, total = await _fetch_rows(db, user, filters)
 
     return AuditLogListResponse(
-        items=[_to_read(audit_row, email) for audit_row, email in paged],
+        items=[_to_read(audit_row, email) for audit_row, email in rows],
         total=total,
         limit=limit,
         offset=offset,
@@ -174,8 +178,7 @@ async def export_audit_logs(
     if user.role != UserRole.owner:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
 
-    rows = await _fetch_rows(db, user, payload)
-    rows = _with_pagination(rows, limit=payload.limit, offset=payload.offset)
+    rows, _ = await _fetch_rows(db, user, payload)
 
     now = datetime.now(UTC)
     for audit_row, _ in rows:
@@ -233,8 +236,7 @@ async def purge_audit_logs(
         limit=limit,
         offset=offset,
     )
-    rows = await _fetch_rows(db, user, filters)
-    rows = _with_pagination(rows, limit=limit, offset=offset)
+    rows, _ = await _fetch_rows(db, user, filters)
 
     now = datetime.now(UTC)
     for audit_row, _ in rows:

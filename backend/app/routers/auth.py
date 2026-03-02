@@ -1,7 +1,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,7 +9,8 @@ from app.database import get_db
 from app.deps import get_current_user
 from app.models.enums import UserRole
 from app.models.user import DomainAllowlist, User
-from app.schemas.auth import AuthMessage, LoginRequest, RefreshRequest, RegisterRequest, TokenPair
+from app.rate_limiter import limiter
+from app.schemas.auth import AuthMessage, LoginRequest, RefreshRequest, RegisterRequest, TokenPair, VerifyRequest
 from app.schemas.user import UserRead
 from app.services.auth import (
     TokenError,
@@ -58,11 +59,11 @@ async def register(payload: RegisterRequest, db: Annotated[AsyncSession, Depends
 
 @router.post("/verify", response_model=AuthMessage)
 async def verify_email(
-    token: Annotated[str, Query(min_length=8)],
+    payload: VerifyRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AuthMessage:
     try:
-        subject = decode_token(token, expected_type="verify")
+        subject = decode_token(payload.token, expected_type="verify")
         user_id = UUID(subject)
     except (TokenError, ValueError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid verification token")
@@ -79,7 +80,9 @@ async def verify_email(
 
 
 @router.post("/login", response_model=TokenPair)
-async def login(payload: LoginRequest, db: Annotated[AsyncSession, Depends(get_db)]) -> TokenPair:
+@limiter.limit("10/minute")
+async def login(request: Request, payload: LoginRequest, db: Annotated[AsyncSession, Depends(get_db)]) -> TokenPair:
+    _ = request
     result = await db.execute(select(User).where(User.email == payload.email.lower()))
     user = result.scalar_one_or_none()
     if user is None or not verify_password(payload.password, user.hashed_password):
