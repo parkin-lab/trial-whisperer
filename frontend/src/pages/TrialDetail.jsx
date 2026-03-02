@@ -59,6 +59,7 @@ export default function TrialDetail({ onLogout }) {
   const [metadataForm, setMetadataForm] = useState({
     nickname: '',
     trial_title: '',
+    document_title: '',
     nct_id: '',
     ctg_url: '',
     indication: '',
@@ -151,6 +152,7 @@ export default function TrialDetail({ onLogout }) {
     setMetadataForm({
       nickname: trial.nickname || '',
       trial_title: trial.trial_title || '',
+      document_title: trial.document_title || '',
       nct_id: trial.nct_id || '',
       ctg_url: trial.ctg_url || '',
       indication: trial.indication || '',
@@ -243,6 +245,7 @@ export default function TrialDetail({ onLogout }) {
       const payload = {
         nickname,
         trial_title: metadataForm.trial_title.trim() || null,
+        document_title: metadataForm.document_title.trim() || null,
         nct_id: metadataForm.nct_id.trim() || null,
         ctg_url: metadataForm.ctg_url.trim() || null,
         indication: metadataForm.indication || null,
@@ -429,6 +432,15 @@ export default function TrialDetail({ onLogout }) {
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                   value={metadataForm.trial_title}
                   onChange={(e) => setMetadataForm((previous) => ({ ...previous, trial_title: e.target.value }))}
+                  disabled={!canEditMetadata || metadataBusy}
+                />
+              </div>
+              <div className="md:col-span-2">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Document Title</p>
+                <input
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  value={metadataForm.document_title}
+                  onChange={(e) => setMetadataForm((previous) => ({ ...previous, document_title: e.target.value }))}
                   disabled={!canEditMetadata || metadataBusy}
                 />
               </div>

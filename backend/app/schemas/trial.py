@@ -12,6 +12,7 @@ class TrialCreate(BaseModel):
     nct_id: str | None = None
     ctg_url: str | None = None
     trial_title: str | None = None
+    document_title: str | None = None
     ctg_match_confidence: float | None = None
     ctg_match_note: str | None = None
     nickname: str
@@ -27,6 +28,7 @@ class TrialUpdate(BaseModel):
     nct_id: str | None = None
     ctg_url: str | None = None
     trial_title: str | None = None
+    document_title: str | None = None
     ctg_match_confidence: float | None = None
     ctg_match_note: str | None = None
     indication: Indication | None = None
@@ -44,6 +46,7 @@ class TrialRead(BaseModel):
     nct_id: str | None
     ctg_url: str | None
     trial_title: str | None
+    document_title: str | None
     ctg_match_confidence: float | None
     ctg_match_note: str | None
     nickname: str

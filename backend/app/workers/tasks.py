@@ -19,6 +19,8 @@ from app.services.trial_metadata import extract_trial_metadata_from_text
 logger = logging.getLogger(__name__)
 settings = get_settings()
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+CTG_AUTOFILL_CONFIDENCE = 0.78
+CTG_TITLE_CANDIDATE_LIMIT = 3
 
 
 def _redis_settings_from_dsn(dsn: str) -> RedisSettings:
@@ -41,6 +43,23 @@ def _normalize_text(value: str | None) -> str:
 
 def _tokenize(value: str | None) -> set[str]:
     return {token for token in TOKEN_PATTERN.findall(_normalize_text(value)) if len(token) > 2}
+
+
+def _ordered_unique_titles(values: list[str | None]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        title = value.strip()
+        if not title:
+            continue
+        key = _normalize_text(title)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(title)
+    return deduped
 
 
 def _has_high_title_similarity(left: str | None, right: str | None) -> bool:
@@ -140,40 +159,65 @@ async def parse_trial_document(ctx: dict, job_id: str) -> None:
                 trial.ctg_url = metadata.ctg_url
             if not trial.trial_title and metadata.trial_title:
                 trial.trial_title = metadata.trial_title
+            if not trial.document_title and metadata.document_title:
+                trial.document_title = metadata.document_title
             if not trial.sponsor and metadata.sponsor:
                 trial.sponsor = metadata.sponsor
             if not trial.phase and metadata.phase:
                 trial.phase = metadata.phase
 
-            if not trial.nct_id and trial.trial_title:
-                try:
-                    ctg_candidates = await search_studies(trial.trial_title)
-                except Exception:
-                    logger.exception("CTG title search failed", extra={"trial_id": str(trial.id)})
-                    trial.ctg_match_note = "CTG title search failed"
-                else:
-                    top_candidate = ctg_candidates[0] if ctg_candidates else None
-                    if top_candidate is None:
-                        trial.ctg_match_confidence = 0.0
-                        trial.ctg_match_note = "No CTG match found from title search"
-                    else:
-                        confidence = _compute_ctg_match_confidence(
-                            trial_title=trial.trial_title,
-                            trial_phase=trial.phase,
-                            trial_sponsor=trial.sponsor,
-                            candidate_title=top_candidate.get("officialTitle"),
-                            candidate_phase=top_candidate.get("phase"),
-                            candidate_sponsor=top_candidate.get("sponsor"),
-                        )
-                        trial.ctg_match_confidence = confidence
-                        if confidence >= 0.75 and top_candidate.get("nctId"):
-                            trial.nct_id = top_candidate["nctId"]
+            if not trial.nct_id:
+                title_candidates = _ordered_unique_titles(
+                    [
+                        trial.trial_title,
+                        *metadata.title_candidates,
+                    ]
+                )[:CTG_TITLE_CANDIDATE_LIMIT]
+
+                if title_candidates:
+                    best_candidate: dict | None = None
+                    best_confidence = -1.0
+                    search_failures = 0
+
+                    for candidate_title in title_candidates:
+                        try:
+                            ctg_candidates = await search_studies(candidate_title)
+                        except Exception:
+                            search_failures += 1
+                            logger.exception(
+                                "CTG title search failed",
+                                extra={"trial_id": str(trial.id), "candidate_title": candidate_title},
+                            )
+                            continue
+
+                        for ctg_candidate in ctg_candidates[:3]:
+                            confidence = _compute_ctg_match_confidence(
+                                trial_title=candidate_title,
+                                trial_phase=trial.phase,
+                                trial_sponsor=trial.sponsor,
+                                candidate_title=ctg_candidate.get("officialTitle"),
+                                candidate_phase=ctg_candidate.get("phase"),
+                                candidate_sponsor=ctg_candidate.get("sponsor"),
+                            )
+                            if confidence > best_confidence:
+                                best_confidence = confidence
+                                best_candidate = ctg_candidate
+
+                    if best_candidate is not None:
+                        trial.ctg_match_confidence = max(0.0, best_confidence)
+                        if best_confidence >= CTG_AUTOFILL_CONFIDENCE and best_candidate.get("nctId"):
+                            trial.nct_id = best_candidate["nctId"]
                             trial.ctg_url = f"https://clinicaltrials.gov/study/{trial.nct_id}"
                             trial.ctg_match_note = "Auto-matched from title search"
                         else:
                             trial.ctg_match_note = "Candidate found; manual review recommended"
+                    elif search_failures == len(title_candidates):
+                        trial.ctg_match_note = "CTG title search failed"
+                    else:
+                        trial.ctg_match_confidence = 0.0
+                        trial.ctg_match_note = "No CTG match found from title search"
 
-            has_ctg_link = bool(trial.nct_id or ((trial.ctg_match_confidence or 0.0) >= 0.75))
+            has_ctg_link = bool(trial.nct_id or ((trial.ctg_match_confidence or 0.0) >= CTG_AUTOFILL_CONFIDENCE))
             has_core_fields = bool(trial.indication and trial.sponsor and trial.phase and has_ctg_link)
             trial.extraction_status = TrialExtractionStatus.ready if has_core_fields else TrialExtractionStatus.needs_review
             trial.extraction_completed_at = datetime.now(UTC)

@@ -29,6 +29,7 @@ class Trial(Base):
     nct_id: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)
     ctg_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     trial_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    document_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     ctg_match_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     ctg_match_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     nickname: Mapped[str] = mapped_column(String(255), index=True)

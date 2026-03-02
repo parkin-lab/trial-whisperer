@@ -159,7 +159,18 @@ export default function Trials({ onLogout }) {
                     </Link>
                   </td>
                   <td className="max-w-md px-4 py-3 text-slate-700" title={trial.trial_title || ''}>
-                    {trial.trial_title ? truncateText(trial.trial_title) : '-'}
+                    {trial.trial_title ? (
+                      <div>
+                        <div>{truncateText(trial.trial_title)}</div>
+                        {trial.document_title && trial.document_title !== trial.trial_title && (
+                          <div className="text-xs text-slate-500" title={trial.document_title}>
+                            Doc: {truncateText(trial.document_title, 88)}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      '-'
+                    )}
                   </td>
                   <td className="px-4 py-3">{trial.nct_id || '-'}</td>
                   <td className="px-4 py-3">{trial.indication ? trial.indication.toUpperCase() : '-'}</td>

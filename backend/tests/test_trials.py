@@ -151,6 +151,7 @@ async def test_metadata_extraction_worker_transitions_to_ready(db_session, monke
             nct_id="NCT12345678",
             ctg_url="https://clinicaltrials.gov/study/NCT12345678",
             trial_title="A Phase 2 Study of New Agent in AML",
+            document_title="Protocol Synopsis: AML-1001",
             sponsor="Trial Sponsor",
             phase="Phase 2",
         )
@@ -172,6 +173,7 @@ async def test_metadata_extraction_worker_transitions_to_ready(db_session, monke
     assert updated_trial.indication == Indication.aml
     assert updated_trial.nct_id == "NCT12345678"
     assert updated_trial.trial_title == "A Phase 2 Study of New Agent in AML"
+    assert updated_trial.document_title == "Protocol Synopsis: AML-1001"
     assert updated_trial.sponsor == "Trial Sponsor"
     assert updated_trial.phase == "Phase 2"
     assert updated_trial.extraction_status == TrialExtractionStatus.ready
@@ -222,10 +224,20 @@ async def test_ctg_title_fallback_auto_fills_nct_when_confidence_high(db_session
             sponsor="City of Hope",
             phase="Phase 2",
             trial_title="A Phase 2 Study of CAR-T in Acute Myeloid Leukemia",
+            document_title="Protocol Synopsis",
+            title_candidates=[
+                "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia",
+                "Randomized Open-Label Multicenter Study of CAR-T in Patients with AML",
+                "Protocol Synopsis",
+            ],
         )
 
+    search_queries: list[str] = []
+
     async def _search_studies(query):
-        assert query == "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia"
+        search_queries.append(query)
+        if "CAR-T" not in query:
+            return []
         return [
             {
                 "nctId": "NCT77778888",
@@ -249,6 +261,11 @@ async def test_ctg_title_fallback_auto_fills_nct_when_confidence_high(db_session
     assert updated_trial.ctg_url == "https://clinicaltrials.gov/study/NCT77778888"
     assert updated_trial.ctg_match_confidence == pytest.approx(1.0)
     assert updated_trial.ctg_match_note == "Auto-matched from title search"
+    assert search_queries == [
+        "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia",
+        "Randomized Open-Label Multicenter Study of CAR-T in Patients with AML",
+        "Protocol Synopsis",
+    ]
     assert updated_trial.extraction_status == TrialExtractionStatus.ready
 
 
@@ -295,10 +312,18 @@ async def test_ctg_title_fallback_low_confidence_needs_manual_review(db_session,
             sponsor="City of Hope",
             phase="Phase 2",
             trial_title="A Phase 2 Study of CAR-T in Acute Myeloid Leukemia",
+            document_title="Protocol Header",
+            title_candidates=[
+                "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia",
+                "Open-Label Study in Patients with AML",
+                "Protocol Header",
+            ],
         )
 
+    search_queries: list[str] = []
+
     async def _search_studies(query):
-        assert query == "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia"
+        search_queries.append(query)
         return [
             {
                 "nctId": "NCT00001111",
@@ -321,4 +346,9 @@ async def test_ctg_title_fallback_low_confidence_needs_manual_review(db_session,
     assert updated_trial.nct_id is None
     assert updated_trial.ctg_match_confidence == pytest.approx(0.0)
     assert updated_trial.ctg_match_note == "Candidate found; manual review recommended"
+    assert search_queries == [
+        "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia",
+        "Open-Label Study in Patients with AML",
+        "Protocol Header",
+    ]
     assert updated_trial.extraction_status == TrialExtractionStatus.needs_review
