@@ -1,5 +1,4 @@
 import logging
-import os
 import re
 from datetime import UTC, datetime
 from urllib.parse import urlparse
@@ -13,17 +12,33 @@ from app.database import AsyncSessionLocal
 from app.models.enums import JobStatus
 from app.models.trial import BackgroundJob, ProtocolEmbedding
 from app.services.documents import extract_text
-from app.services.storage import download_file as storage_download_file, get_local_path_for_extraction
+from app.services.storage import get_local_path_for_extraction
 
 try:
-    from openai import AsyncOpenAI
+    import voyageai
 except ModuleNotFoundError:
-    AsyncOpenAI = None
+    voyageai = None
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?])\s+")
 TOKEN_PATTERN = re.compile(r"\S+")
+
+
+async def _embed_chunks(chunks: list[str], api_key: str) -> list[list[float]]:
+    if voyageai is None:
+        raise RuntimeError("voyageai package is not installed")
+    vo = voyageai.Client(api_key=api_key)
+    result = vo.embed(chunks, model="voyage-3-lite", input_type="document")
+    return result.embeddings
+
+
+async def _embed_query(query: str, api_key: str) -> list[float]:
+    if voyageai is None:
+        raise RuntimeError("voyageai package is not installed")
+    vo = voyageai.Client(api_key=api_key)
+    result = vo.embed([query], model="voyage-3-lite", input_type="query")
+    return result.embeddings[0]
 
 
 def _redis_settings_from_dsn(dsn: str) -> RedisSettings:
@@ -139,25 +154,21 @@ async def embed_protocol_document(ctx: dict, trial_id: str, document_version: in
         logger.error("Invalid trial id for embedding task", extra={"trial_id": trial_id, "document_version": document_version})
         return
 
-    if not settings.openai_api_key:
+    if not settings.voyage_api_key:
         logger.warning(
-            "OPENAI_API_KEY missing; skipping protocol embedding",
+            "VOYAGE_API_KEY missing; skipping protocol embedding",
             extra={"trial_id": trial_id, "document_version": document_version},
         )
         return
-    if AsyncOpenAI is None:
+    if voyageai is None:
         logger.warning(
-            "openai package missing; skipping protocol embedding",
+            "voyageai package missing; skipping protocol embedding",
             extra={"trial_id": trial_id, "document_version": document_version},
         )
         return
 
-    contents, _ = await storage_download_file(file_path)
-    tmp_path = get_local_path_for_extraction(file_path, contents)
-    try:
-        text = extract_text(tmp_path)
-    finally:
-        os.unlink(tmp_path)
+    local_path = get_local_path_for_extraction(file_path, b"")
+    text = extract_text(local_path)
     chunks = _sentence_chunks(text=text, target_tokens=500, overlap_tokens=50)
 
     if not chunks:
@@ -166,7 +177,15 @@ async def embed_protocol_document(ctx: dict, trial_id: str, document_version: in
             extra={"trial_id": trial_id, "document_version": document_version, "file_path": file_path},
         )
 
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    embeddings: list[list[float]]
+    try:
+        embeddings = await _embed_chunks(chunks, settings.voyage_api_key)
+    except Exception:
+        logger.exception(
+            "Failed to generate protocol embeddings",
+            extra={"trial_id": trial_id, "document_version": document_version},
+        )
+        return
 
     async with AsyncSessionLocal() as session:
         await session.execute(
@@ -176,24 +195,7 @@ async def embed_protocol_document(ctx: dict, trial_id: str, document_version: in
             )
         )
 
-        for chunk_index, chunk_text in enumerate(chunks):
-            try:
-                embedding_response = await client.embeddings.create(
-                    model=settings.embedding_model,
-                    input=chunk_text,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to generate chunk embedding",
-                    extra={
-                        "trial_id": trial_id,
-                        "document_version": document_version,
-                        "chunk_index": chunk_index,
-                    },
-                )
-                continue
-
-            vector = embedding_response.data[0].embedding
+        for chunk_index, (chunk_text, vector) in enumerate(zip(chunks, embeddings)):
             session.add(
                 ProtocolEmbedding(
                     trial_id=trial_uuid,

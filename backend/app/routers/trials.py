@@ -1,5 +1,4 @@
 import logging
-import os
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
@@ -385,15 +384,8 @@ async def create_amendment(
     new_contents, _ = await storage_download_file(file_path)
     old_tmp_path = get_local_path_for_extraction(latest_doc.file_path, old_contents)
     new_tmp_path = get_local_path_for_extraction(file_path, new_contents)
-    try:
-        old_text = extract_text(old_tmp_path)
-        new_text = extract_text(new_tmp_path)
-    finally:
-        for tmp_path in (old_tmp_path, new_tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except FileNotFoundError:
-                pass
+    old_text = extract_text(old_tmp_path)
+    new_text = extract_text(new_tmp_path)
 
     summary = summarize_diff(old_text, new_text)
 

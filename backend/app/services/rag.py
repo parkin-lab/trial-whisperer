@@ -9,9 +9,9 @@ from app.config import get_settings
 from app.models.trial import ProtocolEmbedding, TrialDocument
 
 try:
-    from openai import AsyncOpenAI
+    import voyageai
 except ModuleNotFoundError:
-    AsyncOpenAI = None
+    voyageai = None
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -36,12 +36,20 @@ class EmbeddingStatus(BaseModel):
     embeddings_pending: bool
 
 
-class MissingOpenAIKeyError(RuntimeError):
+class MissingVoyageKeyError(RuntimeError):
     pass
 
 
-class MissingOpenAIDependencyError(RuntimeError):
+class MissingVoyageDependencyError(RuntimeError):
     pass
+
+
+def _embed_query_sync(query: str, api_key: str) -> list[float]:
+    if voyageai is None:
+        raise MissingVoyageDependencyError("voyageai package is not installed")
+    vo = voyageai.Client(api_key=api_key)
+    result = vo.embed([query], model="voyage-3-lite", input_type="query")
+    return result.embeddings[0]
 
 
 async def _resolve_document_version(
@@ -99,7 +107,7 @@ async def search_protocol(
     top_k: int = 5,
 ) -> SearchProtocolResult:
     """
-    1. Embed the query using OpenAI text-embedding-3-small
+    1. Embed the query using Voyage AI
     2. Run pgvector cosine similarity search against protocol_embeddings for this trial
     3. Return top_k chunks sorted by similarity, with chunk_index for ordering
     """
@@ -119,17 +127,12 @@ async def search_protocol(
     if chunk_count == 0:
         return SearchProtocolResult(chunks=[], embeddings_pending=True)
 
-    if not settings.openai_api_key:
-        raise MissingOpenAIKeyError("OPENAI_API_KEY is not configured")
-    if AsyncOpenAI is None:
-        raise MissingOpenAIDependencyError("openai package is not installed")
+    if not settings.voyage_api_key:
+        raise MissingVoyageKeyError("VOYAGE_API_KEY is not configured")
+    if voyageai is None:
+        raise MissingVoyageDependencyError("voyageai package is not installed")
 
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
-    embedding_response = await client.embeddings.create(
-        model=settings.embedding_model,
-        input=query,
-    )
-    query_embedding = embedding_response.data[0].embedding
+    query_embedding = _embed_query_sync(query, settings.voyage_api_key)
 
     distance = ProtocolEmbedding.embedding.cosine_distance(query_embedding)
     stmt = (

@@ -15,17 +15,17 @@ from app.models.user import User
 from app.services.rag import (
     ChunkResult,
     EmbeddingStatus,
-    MissingOpenAIDependencyError,
-    MissingOpenAIKeyError,
+    MissingVoyageDependencyError,
+    MissingVoyageKeyError,
     SearchProtocolResult,
     get_embedding_status,
     search_protocol,
 )
 
 try:
-    from openai import AsyncOpenAI
+    import anthropic
 except ModuleNotFoundError:
-    AsyncOpenAI = None
+    anthropic = None
 
 router = APIRouter(tags=["qa"])
 settings = get_settings()
@@ -77,10 +77,15 @@ async def protocol_qa(
 ) -> QAResponse:
     await _ensure_trial_exists(db, trial_id)
 
-    if not settings.openai_api_key:
+    if not settings.anthropic_api_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="OPENAI_API_KEY is not configured. Protocol Q&A is unavailable.",
+            detail="ANTHROPIC_API_KEY is not configured. Protocol Q&A is unavailable.",
+        )
+    if anthropic is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="anthropic package is not installed. Protocol Q&A is unavailable.",
         )
 
     try:
@@ -91,15 +96,15 @@ async def protocol_qa(
             top_k=5,
             db=db,
         )
-    except MissingOpenAIKeyError:
+    except MissingVoyageKeyError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="OPENAI_API_KEY is not configured. Protocol Q&A is unavailable.",
+            detail="VOYAGE_API_KEY is not configured. Protocol Q&A is unavailable.",
         )
-    except MissingOpenAIDependencyError:
+    except MissingVoyageDependencyError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="openai package is not installed. Protocol Q&A is unavailable.",
+            detail="voyageai package is not installed. Protocol Q&A is unavailable.",
         )
     except Exception:
         logger.exception("Protocol similarity search failed", extra={"trial_id": str(trial_id)})
@@ -125,39 +130,30 @@ async def protocol_qa(
             model=settings.qa_model,
         )
 
-    excerpts = "\n\n".join(f"[{idx}] {chunk.chunk_text}" for idx, chunk in enumerate(chunks, start=1))
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a clinical trial protocol assistant. Answer questions about the trial protocol strictly "
-                "based on the provided excerpts. Do not invent information not present in the excerpts. "
-                "Always cite which excerpt supports your answer."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Protocol excerpts:\n{excerpts}\n\n"
-                f"Question: {payload.question}\n\n"
-                "Answer based only on the excerpts above. If the information is not present, say so explicitly."
-            ),
-        },
-    ]
+    excerpts_text = "\n\n".join(f"[{idx}] {chunk.chunk_text}" for idx, chunk in enumerate(chunks, start=1))
 
     try:
-        if AsyncOpenAI is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="openai package is not installed. Protocol Q&A is unavailable.",
-            )
-        client = AsyncOpenAI(api_key=settings.openai_api_key)
-        completion = await client.chat.completions.create(
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        message = client.messages.create(
             model=settings.qa_model,
-            messages=messages,
+            max_tokens=1024,
+            system=(
+                "You are a clinical trial protocol assistant. Answer questions about the trial protocol strictly "
+                "based on the provided excerpts. Do not invent information not present in the excerpts. "
+                "Always cite which excerpt number supports your answer. "
+                "If the information is not present, say so explicitly."
+            ),
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"Protocol excerpts:\n{excerpts_text}\n\n"
+                        f"Question: {payload.question}\n\n"
+                        "Answer based only on the excerpts above."
+                    ),
+                }
+            ],
         )
-    except HTTPException:
-        raise
     except Exception:
         logger.exception("Protocol QA completion failed", extra={"trial_id": str(trial_id)})
         raise HTTPException(
@@ -165,7 +161,7 @@ async def protocol_qa(
             detail="Protocol Q&A completion failed. Please try again.",
         )
 
-    answer_text = (completion.choices[0].message.content or "").strip()
+    answer_text = (message.content[0].text or "").strip()
     if not answer_text:
         answer_text = "The information is not present in the indexed protocol excerpts."
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
@@ -12,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.engine.schema import validate_expression
-from app.models.enums import ConfidenceLevel, UserRole
+from app.models.enums import ConfidenceLevel, CriteriaType, UserRole
 from app.models.trial import Trial, TrialCriteria, TrialDocument
 from app.models.user import User
 from app.schemas.trial import CriteriaReviewStatusRead, TrialCriterionRead, TrialCriterionUpdate
@@ -60,13 +59,7 @@ async def parse_trial_criteria(
 
     contents, _ = await storage_download_file(latest_doc.file_path)
     tmp_path = get_local_path_for_extraction(latest_doc.file_path, contents)
-    try:
-        text = extract_text(tmp_path)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except FileNotFoundError:
-            pass
+    text = extract_text(tmp_path)
 
     if not text.strip():
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Could not extract text from document")
@@ -84,21 +77,31 @@ async def parse_trial_criteria(
 
     rows: list[TrialCriteria] = []
     for item in parsed:
+        item_type = item.get("type", "inclusion")
+        type_value = CriteriaType.exclusion if item_type == "exclusion" else CriteriaType.inclusion
+        text_value = str(item.get("text", "")).strip()
+        if not text_value:
+            continue
+        confidence_value = ConfidenceLevel.high if item.get("confidence") == "high" else ConfidenceLevel.needs_review
+        expression_value = item.get("expression")
+        manual_review_required = confidence_value == ConfidenceLevel.needs_review
+
         try:
-            validate_expression(item.expression)
-            expression_payload = item.expression
+            validate_expression(expression_value)
+            expression_payload = expression_value
         except Exception:
             expression_payload = {"op": "is_true", "field": "manual_review_placeholder"}
-            item.manual_review_required = True
+            confidence_value = ConfidenceLevel.needs_review
+            manual_review_required = True
 
         row = TrialCriteria(
             trial_id=trial_id,
             document_version=latest_doc.version,
-            type=item.type,
-            text=item.text,
+            type=type_value,
+            text=text_value,
             expression=expression_payload,
-            confidence=item.confidence,
-            manual_review_required=item.manual_review_required,
+            confidence=confidence_value,
+            manual_review_required=manual_review_required,
             approved_by=None,
             approved_at=None,
             rule_version=ENGINE_RULE_VERSION,
