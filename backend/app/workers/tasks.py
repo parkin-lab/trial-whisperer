@@ -11,16 +11,31 @@ from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.models.enums import JobStatus, TrialExtractionStatus
 from app.models.trial import BackgroundJob, Trial
-from app.services.ctg import search_studies
+from app.services.ctg import fetch_study, first_study_result, search_studies, search_web
+from app.services.ctg_resolver import (
+    build_keyword_queries,
+    extract_nct_from_text,
+    generate_title_variants,
+    score_candidate,
+)
 from app.services.documents import extract_text
 from app.services.storage import download_file as storage_download_file, get_local_path_for_extraction
 from app.services.trial_metadata import extract_trial_metadata_from_text
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
-TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 CTG_AUTOFILL_CONFIDENCE = 0.78
 CTG_TITLE_CANDIDATE_LIMIT = 3
+CTG_QUERY_RESULT_LIMIT = 3
+CTG_WEB_RESULT_LIMIT = 5
+CTG_SOURCE_TITLE = "title"
+CTG_SOURCE_KEYWORD = "keyword"
+CTG_SOURCE_WEB = "web"
+CTG_MATCH_NOTES_BY_SOURCE = {
+    CTG_SOURCE_TITLE: "Auto-matched from CTG title search",
+    CTG_SOURCE_KEYWORD: "Auto-matched from CTG keyword search",
+    CTG_SOURCE_WEB: "Auto-matched from CTG web fallback",
+}
 
 
 def _redis_settings_from_dsn(dsn: str) -> RedisSettings:
@@ -41,10 +56,6 @@ def _normalize_text(value: str | None) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
-def _tokenize(value: str | None) -> set[str]:
-    return {token for token in TOKEN_PATTERN.findall(_normalize_text(value)) if len(token) > 2}
-
-
 def _ordered_unique_titles(values: list[str | None]) -> list[str]:
     seen: set[str] = set()
     deduped: list[str] = []
@@ -60,56 +71,6 @@ def _ordered_unique_titles(values: list[str | None]) -> list[str]:
         seen.add(key)
         deduped.append(title)
     return deduped
-
-
-def _has_high_title_similarity(left: str | None, right: str | None) -> bool:
-    left_norm = _normalize_text(left)
-    right_norm = _normalize_text(right)
-    if not left_norm or not right_norm:
-        return False
-    if left_norm in right_norm or right_norm in left_norm:
-        return True
-
-    left_tokens = _tokenize(left_norm)
-    right_tokens = _tokenize(right_norm)
-    if not left_tokens or not right_tokens:
-        return False
-    overlap = len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens))
-    return overlap >= 0.6
-
-
-def _phase_matches(left: str | None, right: str | None) -> bool:
-    left_norm = _normalize_text(left)
-    right_norm = _normalize_text(right)
-    if not left_norm or not right_norm:
-        return False
-    return left_norm in right_norm or right_norm in left_norm
-
-
-def _has_sponsor_overlap(left: str | None, right: str | None) -> bool:
-    left_tokens = _tokenize(left)
-    right_tokens = _tokenize(right)
-    if not left_tokens or not right_tokens:
-        return False
-    return bool(left_tokens & right_tokens)
-
-
-def _compute_ctg_match_confidence(
-    trial_title: str | None,
-    trial_phase: str | None,
-    trial_sponsor: str | None,
-    candidate_title: str | None,
-    candidate_phase: str | None,
-    candidate_sponsor: str | None,
-) -> float:
-    confidence = 0.0
-    if _has_high_title_similarity(trial_title, candidate_title):
-        confidence += 0.5
-    if _phase_matches(trial_phase, candidate_phase):
-        confidence += 0.3
-    if _has_sponsor_overlap(trial_sponsor, candidate_sponsor):
-        confidence += 0.2
-    return min(confidence, 1.0)
 
 
 async def parse_trial_document(ctx: dict, job_id: str) -> None:
@@ -175,47 +136,156 @@ async def parse_trial_document(ctx: dict, job_id: str) -> None:
                 )[:CTG_TITLE_CANDIDATE_LIMIT]
 
                 if title_candidates:
-                    best_candidate: dict | None = None
-                    best_confidence = -1.0
+                    candidate_by_nct: dict[str, dict] = {}
                     search_failures = 0
+                    total_title_searches = 0
+                    searched_title_queries: set[str] = set()
+
+                    def _remember_candidate(
+                        ctg_candidate: dict,
+                        source: str,
+                        reference_title: str | None,
+                    ) -> None:
+                        nct_id = (ctg_candidate.get("nctId") or "").upper().strip()
+                        if not nct_id:
+                            return
+
+                        confidence = score_candidate(
+                            trial_title=reference_title,
+                            trial_phase=trial.phase,
+                            trial_sponsor=trial.sponsor,
+                            candidate_title=ctg_candidate.get("officialTitle"),
+                            candidate_phase=ctg_candidate.get("phase"),
+                            candidate_sponsor=ctg_candidate.get("sponsor"),
+                        )
+
+                        existing = candidate_by_nct.get(nct_id)
+                        if existing is None or confidence > existing["confidence"]:
+                            ctg_candidate["nctId"] = nct_id
+                            candidate_by_nct[nct_id] = {
+                                "candidate": ctg_candidate,
+                                "confidence": confidence,
+                                "source": source,
+                            }
 
                     for candidate_title in title_candidates:
+                        title_queries = [candidate_title, *generate_title_variants(candidate_title)]
+                        for query in title_queries:
+                            query_key = _normalize_text(query)
+                            if not query_key or query_key in searched_title_queries:
+                                continue
+                            searched_title_queries.add(query_key)
+                            total_title_searches += 1
+
+                            try:
+                                ctg_candidates = await search_studies(query)
+                            except Exception:
+                                search_failures += 1
+                                logger.exception(
+                                    "CTG title search failed",
+                                    extra={"trial_id": str(trial.id), "candidate_title": candidate_title, "query": query},
+                                )
+                                continue
+
+                            for ctg_candidate in ctg_candidates[:CTG_QUERY_RESULT_LIMIT]:
+                                _remember_candidate(ctg_candidate, CTG_SOURCE_TITLE, candidate_title)
+
+                    indication_value = None
+                    if trial.indication is not None:
+                        indication_value = getattr(trial.indication, "value", str(trial.indication))
+
+                    keyword_queries = build_keyword_queries(
+                        indication=indication_value,
+                        phase=trial.phase,
+                        sponsor=trial.sponsor,
+                        trial_title=trial.trial_title or title_candidates[0],
+                    )
+
+                    for keyword_query in keyword_queries:
                         try:
-                            ctg_candidates = await search_studies(candidate_title)
+                            ctg_candidates = await search_studies(keyword_query)
                         except Exception:
-                            search_failures += 1
                             logger.exception(
-                                "CTG title search failed",
-                                extra={"trial_id": str(trial.id), "candidate_title": candidate_title},
+                                "CTG keyword search failed",
+                                extra={"trial_id": str(trial.id), "query": keyword_query},
                             )
                             continue
 
-                        for ctg_candidate in ctg_candidates[:3]:
-                            confidence = _compute_ctg_match_confidence(
-                                trial_title=candidate_title,
-                                trial_phase=trial.phase,
-                                trial_sponsor=trial.sponsor,
-                                candidate_title=ctg_candidate.get("officialTitle"),
-                                candidate_phase=ctg_candidate.get("phase"),
-                                candidate_sponsor=ctg_candidate.get("sponsor"),
+                        for ctg_candidate in ctg_candidates[:CTG_QUERY_RESULT_LIMIT]:
+                            _remember_candidate(
+                                ctg_candidate,
+                                CTG_SOURCE_KEYWORD,
+                                trial.trial_title or title_candidates[0],
                             )
-                            if confidence > best_confidence:
-                                best_confidence = confidence
-                                best_candidate = ctg_candidate
 
-                    if best_candidate is not None:
+                    seen_web_ncts: set[str] = set()
+                    for candidate_title in title_candidates:
+                        query = f"site:clinicaltrials.gov {candidate_title}"
+                        try:
+                            web_results = await search_web(query, max_results=CTG_WEB_RESULT_LIMIT)
+                        except Exception:
+                            logger.exception(
+                                "CTG web fallback search failed",
+                                extra={"trial_id": str(trial.id), "query": query},
+                            )
+                            continue
+
+                        for result in web_results:
+                            text_blob = " ".join(
+                                filter(
+                                    None,
+                                    [
+                                        str(result.get("url") or ""),
+                                        str(result.get("title") or ""),
+                                        str(result.get("snippet") or ""),
+                                    ],
+                                )
+                            )
+                            nct_id = extract_nct_from_text(text_blob)
+                            if not nct_id or nct_id in seen_web_ncts:
+                                continue
+                            seen_web_ncts.add(nct_id)
+
+                            try:
+                                raw_study = await fetch_study(nct_id)
+                            except Exception:
+                                logger.exception(
+                                    "CTG fetch failed for web fallback candidate",
+                                    extra={"trial_id": str(trial.id), "nct_id": nct_id},
+                                )
+                                continue
+
+                            fetched_candidate = first_study_result(raw_study)
+                            if not fetched_candidate:
+                                continue
+                            fetched_candidate["nctId"] = nct_id
+                            _remember_candidate(
+                                fetched_candidate,
+                                CTG_SOURCE_WEB,
+                                trial.trial_title or candidate_title,
+                            )
+
+                    if candidate_by_nct:
+                        best_match = max(candidate_by_nct.values(), key=lambda item: item["confidence"])
+                        best_candidate = best_match["candidate"]
+                        best_confidence = max(0.0, best_match["confidence"])
+                        best_source = best_match["source"]
+
                         trial.ctg_match_confidence = max(0.0, best_confidence)
                         if best_confidence >= CTG_AUTOFILL_CONFIDENCE and best_candidate.get("nctId"):
                             trial.nct_id = best_candidate["nctId"]
                             trial.ctg_url = f"https://clinicaltrials.gov/study/{trial.nct_id}"
-                            trial.ctg_match_note = "Auto-matched from title search"
+                            trial.ctg_match_note = CTG_MATCH_NOTES_BY_SOURCE.get(
+                                best_source,
+                                CTG_MATCH_NOTES_BY_SOURCE[CTG_SOURCE_TITLE],
+                            )
                         else:
                             trial.ctg_match_note = "Candidate found; manual review recommended"
-                    elif search_failures == len(title_candidates):
+                    elif total_title_searches and search_failures == total_title_searches:
                         trial.ctg_match_note = "CTG title search failed"
                     else:
                         trial.ctg_match_confidence = 0.0
-                        trial.ctg_match_note = "No CTG match found from title search"
+                        trial.ctg_match_note = "No CTG match found from resolver ladder"
 
             has_ctg_link = bool(trial.nct_id or ((trial.ctg_match_confidence or 0.0) >= CTG_AUTOFILL_CONFIDENCE))
             has_core_fields = bool(trial.indication and trial.sponsor and trial.phase and has_ctg_link)
