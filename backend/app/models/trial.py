@@ -19,7 +19,15 @@ except ModuleNotFoundError:
             return f"vector({self.dim})"
 
 from app.database import Base
-from app.models.enums import ConfidenceLevel, CriteriaType, Indication, JobStatus, TrialExtractionStatus, TrialStatus
+from app.models.enums import (
+    ConfidenceLevel,
+    CriteriaParseStatus,
+    CriteriaType,
+    Indication,
+    JobStatus,
+    TrialExtractionStatus,
+    TrialStatus,
+)
 
 
 class Trial(Base):
@@ -109,9 +117,19 @@ class TrialCriteria(Base):
     document_version: Mapped[int] = mapped_column(Integer)
     type: Mapped[CriteriaType] = mapped_column(Enum(CriteriaType, name="criteria_type", native_enum=False))
     text: Mapped[str] = mapped_column(Text)
-    expression: Mapped[dict] = mapped_column(JSON)
-    confidence: Mapped[ConfidenceLevel] = mapped_column(Enum(ConfidenceLevel, name="confidence_level", native_enum=False), default=ConfidenceLevel.needs_review)
+    expression: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    confidence: Mapped[ConfidenceLevel] = mapped_column(
+        Enum(ConfidenceLevel, name="confidence_level", native_enum=False),
+        default=ConfidenceLevel.needs_review,
+    )
     manual_review_required: Mapped[bool] = mapped_column(Boolean, default=True)
+    source_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    section_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parse_status: Mapped[CriteriaParseStatus | None] = mapped_column(
+        Enum(CriteriaParseStatus, name="criteria_parse_status", native_enum=False),
+        nullable=True,
+        default=CriteriaParseStatus.needs_review,
+    )
     approved_by: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rule_version: Mapped[str] = mapped_column(String(64))

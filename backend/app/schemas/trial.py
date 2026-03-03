@@ -5,7 +5,14 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.engine.evaluator import TrialResult
-from app.models.enums import ConfidenceLevel, CriteriaType, Indication, TrialExtractionStatus, TrialStatus
+from app.models.enums import (
+    ConfidenceLevel,
+    CriteriaParseStatus,
+    CriteriaType,
+    Indication,
+    TrialExtractionStatus,
+    TrialStatus,
+)
 
 
 class TrialCreate(BaseModel):
@@ -128,9 +135,12 @@ class CtgCandidateAcceptRequest(BaseModel):
 class ParsedCriterion(BaseModel):
     type: CriteriaType
     text: str
-    expression: dict[str, Any]
+    expression: dict[str, Any] | None
     confidence: ConfidenceLevel = ConfidenceLevel.needs_review
     manual_review_required: bool = True
+    source_order: int | None = None
+    section_label: str | None = None
+    parse_status: CriteriaParseStatus = CriteriaParseStatus.needs_review
 
 
 class TrialCriterionRead(BaseModel):
@@ -141,9 +151,12 @@ class TrialCriterionRead(BaseModel):
     document_version: int
     type: CriteriaType
     text: str
-    expression: dict[str, Any]
+    expression: dict[str, Any] | None
     confidence: ConfidenceLevel
     manual_review_required: bool
+    source_order: int | None
+    section_label: str | None
+    parse_status: CriteriaParseStatus | None
     approved_by: UUID | None
     approved_at: datetime | None
     rule_version: str
@@ -152,7 +165,9 @@ class TrialCriterionRead(BaseModel):
 class TrialCriterionUpdate(BaseModel):
     text: str | None = None
     expression: dict[str, Any] | None = None
+    confidence: ConfidenceLevel | None = None
     manual_review_required: bool | None = None
+    parse_status: CriteriaParseStatus | None = None
     approve: bool | None = None
 
 

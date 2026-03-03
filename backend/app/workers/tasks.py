@@ -10,7 +10,7 @@ from sqlalchemy import delete, select
 from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.engine.schema import validate_expression
-from app.models.enums import ConfidenceLevel, JobStatus, TrialExtractionStatus
+from app.models.enums import ConfidenceLevel, CriteriaParseStatus, JobStatus, TrialExtractionStatus
 from app.models.trial import BackgroundJob, Trial, TrialCriteria, TrialDocument
 from app.services.criteria_parser import parse_criteria_from_text
 from app.services.ctg import fetch_study, first_study_result, search_studies, search_web
@@ -117,6 +117,13 @@ async def _upsert_parsed_criteria(
     document_version: int,
     text: str,
 ) -> int:
+    await session.execute(
+        delete(TrialCriteria).where(
+            TrialCriteria.trial_id == trial_id,
+            TrialCriteria.document_version == document_version,
+        )
+    )
+
     parsed = await parse_criteria_from_text(text)
     if not parsed:
         logger.info(
@@ -125,30 +132,35 @@ async def _upsert_parsed_criteria(
         )
         return 0
 
-    await session.execute(
-        delete(TrialCriteria).where(
-            TrialCriteria.trial_id == trial_id,
-            TrialCriteria.document_version == document_version,
-        )
-    )
-
     inserted_count = 0
     for item in parsed:
-        criterion_text = (item.text or "").strip()
-        if not criterion_text:
+        criterion_text = item.text or ""
+        if not criterion_text.strip():
             continue
 
+        expression_payload = item.expression
         confidence_value = item.confidence
-        expression_value = item.expression
         manual_review_required = item.manual_review_required
+        parse_status = item.parse_status
 
-        try:
-            validate_expression(expression_value)
-            expression_payload = expression_value
-        except Exception:
-            expression_payload = {"op": "is_true", "field": "manual_review_placeholder"}
+        if expression_payload is None:
             confidence_value = ConfidenceLevel.needs_review
-            manual_review_required = True
+            parse_status = CriteriaParseStatus.needs_review
+        else:
+            try:
+                validate_expression(expression_payload)
+            except Exception:
+                expression_payload = None
+                confidence_value = ConfidenceLevel.needs_review
+                manual_review_required = True
+                parse_status = CriteriaParseStatus.needs_review
+            else:
+                if (
+                    parse_status == CriteriaParseStatus.needs_review
+                    and confidence_value == ConfidenceLevel.high
+                    and not manual_review_required
+                ):
+                    parse_status = CriteriaParseStatus.parsed
 
         row = TrialCriteria(
             trial_id=trial_id,
@@ -158,6 +170,9 @@ async def _upsert_parsed_criteria(
             expression=expression_payload,
             confidence=confidence_value,
             manual_review_required=manual_review_required,
+            source_order=item.source_order,
+            section_label=item.section_label,
+            parse_status=parse_status,
             approved_by=None,
             approved_at=None,
             rule_version=ENGINE_RULE_VERSION,

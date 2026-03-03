@@ -39,6 +39,13 @@ class ConfidenceLevel(StrEnum):
     needs_review = "needs_review"
 
 
+class CriteriaParseStatus(StrEnum):
+    parsed = "parsed"
+    needs_review = "needs_review"
+    approved = "approved"
+    manual_only = "manual_only"
+
+
 class JobStatus(StrEnum):
     pending = "pending"
     running = "running"

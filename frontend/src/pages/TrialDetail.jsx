@@ -12,6 +12,13 @@ const confidenceClass = {
   needs_review: 'bg-amber-100 text-amber-800',
 }
 
+const parseStatusClass = {
+  parsed: 'bg-sky-100 text-sky-800',
+  needs_review: 'bg-amber-100 text-amber-800',
+  approved: 'bg-emerald-100 text-emerald-800',
+  manual_only: 'bg-violet-100 text-violet-800',
+}
+
 const extractionStatusClass = {
   processing: 'bg-sky-100 text-sky-800',
   ready: 'bg-emerald-100 text-emerald-800',
@@ -24,19 +31,9 @@ function truncateSummary(value, maxLength = 180) {
   return `${value.slice(0, maxLength)}...`
 }
 
-function collectExpressionFields(expression, acc = new Set()) {
-  if (!expression || typeof expression !== 'object') return acc
-  if (typeof expression.field === 'string' && expression.field.trim()) {
-    acc.add(expression.field.trim())
-  }
-  if (Array.isArray(expression.operands)) {
-    expression.operands.forEach((item) => collectExpressionFields(item, acc))
-  }
-  return acc
-}
-
 function expressionPreview(expression) {
-  if (!expression || typeof expression !== 'object') return 'N/A'
+  if (!expression || typeof expression !== 'object') return 'No structured mapping (manual review)'
+  if (expression.field === 'manual_review_placeholder') return 'No structured mapping (manual review)'
   const op = typeof expression.op === 'string' ? expression.op : 'expression'
   const field = typeof expression.field === 'string' ? expression.field : ''
   const value = Object.prototype.hasOwnProperty.call(expression, 'value') ? String(expression.value) : ''
@@ -61,7 +58,11 @@ export default function TrialDetail({ onLogout }) {
   const [uploadOpen, setUploadOpen] = useState(false)
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [editTarget, setEditTarget] = useState(null)
+  const [editText, setEditText] = useState('')
   const [editExpression, setEditExpression] = useState('')
+  const [editExpressionError, setEditExpressionError] = useState('')
+  const [editConfidence, setEditConfidence] = useState('needs_review')
+  const [editParseStatus, setEditParseStatus] = useState('needs_review')
   const [editManualReview, setEditManualReview] = useState(false)
   const [criteriaBusy, setCriteriaBusy] = useState(false)
   const [auditEntries, setAuditEntries] = useState([])
@@ -137,10 +138,10 @@ export default function TrialDetail({ onLogout }) {
     }
   }
 
-  const loadCriteria = async () => {
+  const loadCriteria = async (view = criteriaView) => {
     try {
       const [criteriaRes, statusRes] = await Promise.all([
-        api.get(`/trials/${id}/criteria`),
+        api.get(`/trials/${id}/criteria`, { params: { type: view } }),
         api.get(`/trials/${id}/criteria/review-status`),
       ])
       setCriteria(criteriaRes.data)
@@ -163,7 +164,7 @@ export default function TrialDetail({ onLogout }) {
   }
 
   const load = async () => {
-    await Promise.all([loadTrialData(), loadCriteria(), loadQaStatus(), loadCtgCandidates()])
+    await Promise.all([loadTrialData(), loadQaStatus(), loadCtgCandidates()])
   }
 
   useEffect(() => {
@@ -190,17 +191,16 @@ export default function TrialDetail({ onLogout }) {
     })
   }, [trial])
 
-  const filteredCriteria = useMemo(() => {
-    if (criteriaView === 'all') return criteria
-    return criteria.filter((row) => row.type === criteriaView)
-  }, [criteria, criteriaView])
+  useEffect(() => {
+    loadCriteria(criteriaView)
+  }, [criteriaView, id])
 
   const parseCriteria = async () => {
     setCriteriaBusy(true)
     setCriteriaError('')
     try {
       await api.post(`/trials/${id}/criteria/parse`)
-      await loadCriteria()
+      await loadCriteria(criteriaView)
     } catch (err) {
       setCriteriaError(err.response?.data?.detail || 'Criteria parsing failed.')
     } finally {
@@ -213,7 +213,7 @@ export default function TrialDetail({ onLogout }) {
     setCriteriaError('')
     try {
       await api.post(`/trials/${id}/criteria/${criterionId}/approve`)
-      await loadCriteria()
+      await loadCriteria(criteriaView)
     } catch (err) {
       setCriteriaError(err.response?.data?.detail || 'Approve failed.')
     } finally {
@@ -221,12 +221,12 @@ export default function TrialDetail({ onLogout }) {
     }
   }
 
-  const approveAll = async () => {
+  const approveReviewed = async () => {
     setCriteriaBusy(true)
     setCriteriaError('')
     try {
-      await api.post(`/trials/${id}/criteria/approve-all`)
-      await loadCriteria()
+      await api.post(`/trials/${id}/criteria/approve-reviewed`)
+      await loadCriteria(criteriaView)
     } catch (err) {
       setCriteriaError(err.response?.data?.detail || 'Bulk approve failed.')
     } finally {
@@ -243,9 +243,27 @@ export default function TrialDetail({ onLogout }) {
     setCriteriaError('')
     try {
       await api.delete(`/trials/${id}/criteria/${criterionId}`)
-      await loadCriteria()
+      await loadCriteria(criteriaView)
     } catch (err) {
       setCriteriaError(err.response?.data?.detail || 'Delete failed.')
+    } finally {
+      setCriteriaBusy(false)
+    }
+  }
+
+  const toggleManualOnly = async (criterion) => {
+    if (!canReview || criteriaBusy) return
+    setCriteriaBusy(true)
+    setCriteriaError('')
+    try {
+      const isManualOnly = criterion.parse_status === 'manual_only'
+      await api.patch(`/trials/${id}/criteria/${criterion.id}`, {
+        parse_status: isManualOnly ? 'needs_review' : 'manual_only',
+        manual_review_required: !isManualOnly,
+      })
+      await loadCriteria(criteriaView)
+    } catch (err) {
+      setCriteriaError(err.response?.data?.detail || 'Manual-only toggle failed.')
     } finally {
       setCriteriaBusy(false)
     }
@@ -338,32 +356,49 @@ export default function TrialDetail({ onLogout }) {
 
   const openEdit = (criterion) => {
     setEditTarget(criterion)
-    setEditExpression(JSON.stringify(criterion.expression, null, 2))
+    setEditText(criterion.text || '')
+    setEditExpression(criterion.expression ? JSON.stringify(criterion.expression, null, 2) : '')
+    setEditExpressionError('')
+    setEditConfidence(criterion.confidence || 'needs_review')
+    setEditParseStatus(criterion.parse_status || 'needs_review')
     setEditManualReview(criterion.manual_review_required)
     setEditModalOpen(true)
   }
 
   const saveEdit = async () => {
     if (!editTarget) return
+    const trimmedText = editText.trim()
+    if (!trimmedText) {
+      setEditExpressionError('Text is required.')
+      return
+    }
 
     let parsedExpression
-    try {
-      parsedExpression = JSON.parse(editExpression)
-    } catch {
-      setCriteriaError('Expression must be valid JSON.')
-      return
+    if (!editExpression.trim()) {
+      parsedExpression = null
+    } else {
+      try {
+        parsedExpression = JSON.parse(editExpression)
+      } catch {
+        setEditExpressionError('Expression must be valid JSON.')
+        return
+      }
     }
 
     setCriteriaBusy(true)
     setCriteriaError('')
+    setEditExpressionError('')
     try {
       await api.patch(`/trials/${id}/criteria/${editTarget.id}`, {
+        text: trimmedText,
         expression: parsedExpression,
+        confidence: editConfidence,
         manual_review_required: editManualReview,
+        parse_status: editParseStatus,
       })
       setEditModalOpen(false)
       setEditTarget(null)
-      await loadCriteria()
+      await loadCriteria(criteriaView)
     } catch (err) {
       setCriteriaError(err.response?.data?.detail || 'Could not save criterion changes.')
     } finally {
@@ -788,10 +823,10 @@ export default function TrialDetail({ onLogout }) {
                   </button>
                   <button
                     className="rounded-lg bg-ink px-3 py-2 text-sm text-white disabled:opacity-50"
-                    onClick={approveAll}
+                    onClick={approveReviewed}
                     disabled={criteriaBusy}
                   >
-                    Approve All
+                    Approve Reviewed
                   </button>
                 </div>
               )}
@@ -830,32 +865,35 @@ export default function TrialDetail({ onLogout }) {
               <table className="min-w-full text-sm">
                 <thead className="bg-slate-50 text-left text-slate-600">
                   <tr>
-                    <th className="px-4 py-3">Type</th>
+                    <th className="px-4 py-3">#</th>
                     <th className="px-4 py-3">Criterion text</th>
-                    <th className="px-4 py-3">Variable(s)</th>
-                    <th className="px-4 py-3">Expression preview</th>
+                    <th className="px-4 py-3">Structured mapping</th>
                     <th className="px-4 py-3">Confidence</th>
+                    <th className="px-4 py-3">Status</th>
                     <th className="px-4 py-3">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredCriteria.map((row) => {
-                    const variables = Array.from(collectExpressionFields(row.expression))
+                  {criteria.map((row, idx) => {
+                    const sourceOrder = row.source_order || idx + 1
+                    const parseStatus = row.parse_status || 'needs_review'
                     return (
                       <tr key={row.id} className="border-t border-slate-100 align-top">
                         <td className="px-4 py-3">
-                          <span className="badge bg-slate-100 text-slate-700">{row.type}</span>
+                          <span className="badge bg-slate-100 text-slate-700">{sourceOrder}</span>
                         </td>
                         <td className="px-4 py-3">{row.text}</td>
-                        <td className="px-4 py-3">
-                          {variables.length > 0 ? variables.join(', ') : 'N/A'}
-                        </td>
                         <td className="px-4 py-3 text-xs text-slate-700">
                           {expressionPreview(row.expression)}
                         </td>
                         <td className="px-4 py-3">
                           <span className={`badge ${confidenceClass[row.confidence] || 'bg-slate-100 text-slate-700'}`}>
                             {row.confidence}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`badge ${parseStatusClass[parseStatus] || 'bg-slate-100 text-slate-700'}`}>
+                            {parseStatus}
                           </span>
                         </td>
                         <td className="px-4 py-3">
@@ -883,6 +921,13 @@ export default function TrialDetail({ onLogout }) {
                                   Approve
                                 </button>
                               )}
+                              <button
+                                className="rounded-lg border border-violet-300 px-2 py-1 text-xs text-violet-800"
+                                onClick={() => toggleManualOnly(row)}
+                                disabled={criteriaBusy}
+                              >
+                                {row.parse_status === 'manual_only' ? 'Manual-only: On' : 'Mark Manual-only'}
+                              </button>
                             </div>
                           ) : (
                             <span className="text-xs text-slate-500">No actions available</span>
@@ -893,7 +938,7 @@ export default function TrialDetail({ onLogout }) {
                   })}
                 </tbody>
               </table>
-              {filteredCriteria.length === 0 && <div className="p-4 text-sm text-slate-500">No criteria in this view.</div>}
+              {criteria.length === 0 && <div className="p-4 text-sm text-slate-500">No criteria in this view.</div>}
             </div>
           </div>
         </div>
@@ -1049,7 +1094,6 @@ export default function TrialDetail({ onLogout }) {
     canArchive,
     canDelete,
     criteria,
-    filteredCriteria,
     criteriaView,
     reviewStatus,
     criteriaError,
@@ -1115,14 +1159,48 @@ export default function TrialDetail({ onLogout }) {
       {editModalOpen && editTarget && (
         <div className="fixed inset-0 z-30 flex items-center justify-center bg-ink/50 p-4">
           <div className="w-full max-w-2xl rounded-2xl bg-white p-5 shadow-2xl">
-            <h3 className="font-display text-xl">Edit Criterion Expression</h3>
-            <p className="mt-1 text-xs text-slate-500">{editTarget.text}</p>
+            <h3 className="font-display text-xl">Edit Criterion</h3>
 
+            <label className="mt-4 block text-xs uppercase tracking-wide text-slate-500">Criterion text</label>
             <textarea
-              className="mt-4 h-64 w-full rounded-lg border border-slate-300 p-3 font-mono text-xs"
+              className="mt-1 h-28 w-full rounded-lg border border-slate-300 p-3 text-sm"
+              value={editText}
+              onChange={(e) => setEditText(e.target.value)}
+            />
+
+            <label className="mt-3 block text-xs uppercase tracking-wide text-slate-500">Expression JSON (optional)</label>
+            <textarea
+              className="mt-1 h-48 w-full rounded-lg border border-slate-300 p-3 font-mono text-xs"
               value={editExpression}
               onChange={(e) => setEditExpression(e.target.value)}
             />
+
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <div>
+                <label className="block text-xs uppercase tracking-wide text-slate-500">Confidence</label>
+                <select
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  value={editConfidence}
+                  onChange={(e) => setEditConfidence(e.target.value)}
+                >
+                  <option value="high">high</option>
+                  <option value="needs_review">needs_review</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs uppercase tracking-wide text-slate-500">Status</label>
+                <select
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  value={editParseStatus}
+                  onChange={(e) => setEditParseStatus(e.target.value)}
+                >
+                  <option value="parsed">parsed</option>
+                  <option value="needs_review">needs_review</option>
+                  <option value="approved">approved</option>
+                  <option value="manual_only">manual_only</option>
+                </select>
+              </div>
+            </div>
 
             <label className="mt-3 flex items-center gap-2 text-sm text-slate-700">
               <input
@@ -1132,11 +1210,16 @@ export default function TrialDetail({ onLogout }) {
               />
               Manual review required
             </label>
+            {editExpressionError && <p className="mt-2 text-sm text-rose-700">{editExpressionError}</p>}
 
             <div className="mt-4 flex justify-between">
               <button
                 className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                onClick={() => setEditModalOpen(false)}
+                onClick={() => {
+                  setEditModalOpen(false)
+                  setEditTarget(null)
+                  setEditExpressionError('')
+                }}
               >
                 Cancel
               </button>
