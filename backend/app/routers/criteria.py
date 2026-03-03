@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -190,6 +190,19 @@ async def approve_criterion(
     await db.commit()
     await db.refresh(criterion)
     return TrialCriterionRead.model_validate(criterion)
+
+
+@router.delete("/trials/{trial_id}/criteria/{criterion_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_criterion(
+    trial_id: UUID,
+    criterion_id: UUID,
+    _: Annotated[User, Depends(require_role(UserRole.owner, UserRole.pi, UserRole.coordinator))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    criterion = await _get_criterion_or_404(db, trial_id, criterion_id)
+    await db.delete(criterion)
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/trials/{trial_id}/criteria/approve-all")

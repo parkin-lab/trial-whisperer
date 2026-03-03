@@ -90,6 +90,26 @@ def _candidate_title(candidate: dict) -> str | None:
     return str(title_value).strip()[:500] or None
 
 
+def _build_candidate_pool(candidate_by_nct: dict[str, dict]) -> list[dict]:
+    ranked = sorted(candidate_by_nct.values(), key=lambda item: item.get("confidence", 0.0), reverse=True)[:3]
+    pool: list[dict] = []
+    for item in ranked:
+        candidate = item.get("candidate") or {}
+        nct_id = str(candidate.get("nctId") or "").strip()
+        if not nct_id:
+            continue
+        pool.append(
+            {
+                "nct_id": nct_id,
+                "title": _candidate_title(candidate),
+                "url": f"https://clinicaltrials.gov/study/{nct_id}",
+                "confidence": max(0.0, float(item.get("confidence", 0.0))),
+                "source": item.get("source"),
+            }
+        )
+    return pool
+
+
 async def _upsert_parsed_criteria(
     *,
     session,
@@ -391,6 +411,7 @@ async def parse_trial_document(ctx: dict, job_id: str) -> None:
                             )
 
                     if candidate_by_nct:
+                        trial.ctg_candidate_pool = _build_candidate_pool(candidate_by_nct)
                         best_match = max(candidate_by_nct.values(), key=lambda item: item["confidence"])
                         best_candidate = best_match["candidate"]
                         best_confidence = max(0.0, best_match["confidence"])
@@ -418,13 +439,21 @@ async def parse_trial_document(ctx: dict, job_id: str) -> None:
                             trial.ctg_candidate_source = best_source
                             trial.ctg_match_note = "Candidate found; manual review recommended"
                     elif total_title_searches and search_failures == total_title_searches:
+                        trial.ctg_candidate_pool = None
                         _clear_ctg_candidate_fields(trial)
                         trial.ctg_match_note = "CTG title search failed"
                     else:
+                        trial.ctg_candidate_pool = None
                         trial.ctg_match_confidence = 0.0
                         _clear_ctg_candidate_fields(trial)
                         trial.ctg_match_note = "No CTG match found from resolver ladder"
+                else:
+                    trial.ctg_candidate_pool = None
+                    trial.ctg_match_confidence = 0.0
+                    _clear_ctg_candidate_fields(trial)
+                    trial.ctg_match_note = "No CTG match found from resolver ladder"
             else:
+                trial.ctg_candidate_pool = None
                 _clear_ctg_candidate_fields(trial)
 
             has_ctg_link = bool(trial.nct_id)

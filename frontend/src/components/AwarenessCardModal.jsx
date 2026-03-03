@@ -6,7 +6,7 @@ function toNullable(value) {
   return trimmed ? trimmed : null
 }
 
-function inferInterventionClassFromTitle(trial) {
+function inferMechanismFromTitle(trial) {
   const source = `${trial?.trial_title || ''} ${trial?.document_title || ''}`.toLowerCase()
   const sourcePadded = ` ${source} `
   if (!source.trim()) return ''
@@ -31,45 +31,24 @@ function inferInterventionClassFromTitle(trial) {
   return ''
 }
 
-function extractReferralContactFromNotes(trial) {
-  if (typeof trial?.referral_contact === 'string' && trial.referral_contact.trim()) {
-    return trial.referral_contact.trim()
-  }
-
-  const notes = [trial?.notes, trial?.trial_notes, trial?.study_notes]
-    .filter((value) => typeof value === 'string' && value.trim())
-    .join('\n')
-  if (!notes) return ''
-
-  const contactLine = notes.match(/(?:referral contact|contact)\s*[:\-]\s*([^\n]+)/i)
-  if (contactLine?.[1]) {
-    return contactLine[1].trim()
-  }
-  const emailMatch = notes.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
-  return emailMatch?.[0] || ''
-}
-
 export default function AwarenessCardModal({ open, onClose, trialId, trial }) {
   const [form, setForm] = useState({
     disease_setting: '',
-    intervention_class: '',
-    why_it_matters: '',
-    when_to_think: '',
-    referral_contact: '',
+    mechanism: '',
+    trial_purpose: '',
   })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [card, setCard] = useState(null)
+  const [previewText, setPreviewText] = useState('')
   const [copied, setCopied] = useState(false)
   const [hasGeneratedInSession, setHasGeneratedInSession] = useState(false)
   const [autoGenerateForm, setAutoGenerateForm] = useState(null)
 
   const buildPayload = (formValues) => ({
     disease_setting: toNullable(formValues.disease_setting),
-    intervention_class: toNullable(formValues.intervention_class),
-    why_it_matters: toNullable(formValues.why_it_matters),
-    when_to_think: toNullable(formValues.when_to_think),
-    referral_contact: toNullable(formValues.referral_contact),
+    mechanism: toNullable(formValues.mechanism),
+    trial_purpose: toNullable(formValues.trial_purpose),
   })
 
   const generateCard = async (formValues = form) => {
@@ -79,6 +58,7 @@ export default function AwarenessCardModal({ open, onClose, trialId, trial }) {
     try {
       const res = await api.post(`/trials/${trialId}/awareness/generate`, buildPayload(formValues))
       setCard(res.data)
+      setPreviewText(res.data?.text_card || '')
       setHasGeneratedInSession(true)
     } catch (err) {
       setError(err.response?.data?.detail || 'Could not generate awareness card.')
@@ -91,19 +71,16 @@ export default function AwarenessCardModal({ open, onClose, trialId, trial }) {
     if (!open) return
     const initialForm = {
       disease_setting: trial?.indication || '',
-      intervention_class: inferInterventionClassFromTitle(trial),
-      why_it_matters: '',
-      when_to_think: '',
-      referral_contact: extractReferralContactFromNotes(trial),
+      mechanism: inferMechanismFromTitle(trial),
+      trial_purpose: '',
     }
     setHasGeneratedInSession(false)
     setAutoGenerateForm(initialForm)
-    setForm({
-      ...initialForm,
-    })
+    setForm({ ...initialForm })
     setBusy(false)
     setError('')
     setCard(null)
+    setPreviewText('')
     setCopied(false)
   }, [open, trialId])
 
@@ -120,14 +97,18 @@ export default function AwarenessCardModal({ open, onClose, trialId, trial }) {
   }
 
   const copyText = async () => {
-    if (!card?.text_card) return
-    await navigator.clipboard.writeText(card.text_card)
+    if (!previewText) return
+    await navigator.clipboard.writeText(previewText)
     setCopied(true)
   }
 
   const downloadJson = () => {
     if (!card) return
-    const blob = new Blob([JSON.stringify(card, null, 2)], { type: 'application/json' })
+    const payload = {
+      ...card,
+      text_card: previewText,
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
     const url = window.URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -158,35 +139,19 @@ export default function AwarenessCardModal({ open, onClose, trialId, trial }) {
             />
           </label>
           <label className="text-sm text-slate-700">
-            Intervention class
+            Mechanism / intervention
             <input
               className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-              value={form.intervention_class}
-              onChange={(e) => setField('intervention_class', e.target.value)}
+              value={form.mechanism}
+              onChange={(e) => setField('mechanism', e.target.value)}
             />
           </label>
           <label className="text-sm text-slate-700 md:col-span-2">
-            Why it matters
+            Trial purpose override (optional)
             <textarea
               className="mt-1 h-20 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-              value={form.why_it_matters}
-              onChange={(e) => setField('why_it_matters', e.target.value)}
-            />
-          </label>
-          <label className="text-sm text-slate-700 md:col-span-2">
-            When to think
-            <textarea
-              className="mt-1 h-20 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-              value={form.when_to_think}
-              onChange={(e) => setField('when_to_think', e.target.value)}
-            />
-          </label>
-          <label className="text-sm text-slate-700 md:col-span-2">
-            Referral contact
-            <input
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-              value={form.referral_contact}
-              onChange={(e) => setField('referral_contact', e.target.value)}
+              value={form.trial_purpose}
+              onChange={(e) => setField('trial_purpose', e.target.value)}
             />
           </label>
         </div>
@@ -202,7 +167,7 @@ export default function AwarenessCardModal({ open, onClose, trialId, trial }) {
           <button
             className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:opacity-50"
             onClick={copyText}
-            disabled={!card?.text_card}
+            disabled={!previewText}
           >
             Copy Text
           </button>
@@ -219,8 +184,13 @@ export default function AwarenessCardModal({ open, onClose, trialId, trial }) {
         {error && <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</div>}
 
         <div className="mt-4 rounded-xl border border-slate-200 bg-fog p-3">
-          <p className="text-xs uppercase tracking-wide text-slate-500">Text card preview</p>
-          <pre className="mt-2 whitespace-pre-wrap text-sm text-slate-800">{card?.text_card || 'No card generated yet.'}</pre>
+          <p className="text-xs uppercase tracking-wide text-slate-500">Text card preview (editable)</p>
+          <textarea
+            className="mt-2 h-44 w-full rounded-lg border border-slate-300 p-3 text-sm text-slate-800"
+            value={previewText}
+            onChange={(e) => setPreviewText(e.target.value)}
+            placeholder="No card generated yet."
+          />
         </div>
       </div>
     </div>

@@ -17,7 +17,15 @@ from app.deps import get_current_user, require_role
 from app.models.enums import Indication, JobStatus, TrialExtractionStatus, TrialStatus, UserRole
 from app.models.trial import BackgroundJob, Trial, TrialAmendment, TrialCriteria, TrialDocument
 from app.models.user import User
-from app.schemas.trial import TrialAmendmentRead, TrialCreate, TrialDocumentRead, TrialRead, TrialUpdate
+from app.schemas.trial import (
+    CtgCandidateAcceptRequest,
+    CtgCandidateRead,
+    TrialAmendmentRead,
+    TrialCreate,
+    TrialDocumentRead,
+    TrialRead,
+    TrialUpdate,
+)
 from app.services.documents import extract_text, summarize_diff
 from app.services.storage import (
     download_file as storage_download_file,
@@ -46,6 +54,27 @@ def _mark_extraction_processing(trial: Trial) -> None:
     trial.extraction_status = TrialExtractionStatus.processing
     trial.extraction_started_at = datetime.now(UTC)
     trial.extraction_completed_at = None
+
+
+def _candidate_pool_from_trial(trial: Trial) -> list[CtgCandidateRead]:
+    raw_pool = trial.ctg_candidate_pool if isinstance(trial.ctg_candidate_pool, list) else []
+    validated: list[CtgCandidateRead] = []
+    for item in raw_pool:
+        if not isinstance(item, dict):
+            continue
+        nct_id = str(item.get("nct_id") or "").strip()
+        if not nct_id:
+            continue
+        validated.append(
+            CtgCandidateRead(
+                nct_id=nct_id,
+                title=item.get("title"),
+                url=item.get("url"),
+                confidence=item.get("confidence"),
+                source=item.get("source"),
+            )
+        )
+    return validated[:3]
 
 
 async def _get_trial_or_404(db: AsyncSession, trial_id: UUID) -> Trial:
@@ -269,10 +298,34 @@ async def update_trial(
         trial.ctg_candidate_url = None
         trial.ctg_candidate_title = None
         trial.ctg_candidate_source = None
+        trial.ctg_candidate_pool = None
 
     await db.commit()
     await db.refresh(trial)
     return TrialRead.model_validate(trial)
+
+
+@router.get("/{trial_id}/ctg/candidates", response_model=list[CtgCandidateRead])
+async def get_ctg_candidates(
+    trial_id: UUID,
+    _: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CtgCandidateRead]:
+    trial = await _get_trial_or_404(db, trial_id)
+    pool = _candidate_pool_from_trial(trial)
+    if pool:
+        return pool
+    if trial.ctg_candidate_nct_id:
+        return [
+            CtgCandidateRead(
+                nct_id=trial.ctg_candidate_nct_id,
+                title=trial.ctg_candidate_title,
+                url=trial.ctg_candidate_url or _build_ctg_url(trial.ctg_candidate_nct_id),
+                confidence=trial.ctg_match_confidence,
+                source=trial.ctg_candidate_source,
+            )
+        ]
+    return []
 
 
 @router.post("/{trial_id}/ctg/accept-candidate", response_model=TrialRead)
@@ -280,23 +333,31 @@ async def accept_ctg_candidate(
     trial_id: UUID,
     _: Annotated[User, Depends(require_role(UserRole.owner, UserRole.pi, UserRole.coordinator))],
     db: Annotated[AsyncSession, Depends(get_db)],
+    payload: CtgCandidateAcceptRequest | None = None,
 ) -> TrialRead:
     trial = await _get_trial_or_404(db, trial_id)
 
-    if not trial.ctg_candidate_nct_id:
+    candidate_nct = (
+        (payload.nct_id.strip().upper() if payload and payload.nct_id else "") or (trial.ctg_candidate_nct_id or "")
+    )
+    if not candidate_nct:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="No CTG candidate available for acceptance",
         )
 
-    trial.nct_id = trial.ctg_candidate_nct_id
-    trial.ctg_url = trial.ctg_candidate_url or _build_ctg_url(trial.ctg_candidate_nct_id)
-    if trial.ctg_candidate_title:
-        trial.trial_title = trial.ctg_candidate_title
+    trial.nct_id = candidate_nct
+    trial.ctg_url = (payload.url if payload else None) or trial.ctg_candidate_url or _build_ctg_url(candidate_nct)
+    candidate_title = (payload.title.strip() if payload and payload.title else "") or (trial.ctg_candidate_title or "")
+    if candidate_title:
+        trial.trial_title = candidate_title
     trial.ctg_candidate_nct_id = None
     trial.ctg_candidate_url = None
     trial.ctg_candidate_title = None
     trial.ctg_candidate_source = None
+    trial.ctg_candidate_pool = None
+    if payload and payload.confidence is not None:
+        trial.ctg_match_confidence = payload.confidence
     trial.ctg_match_note = "Candidate manually accepted"
 
     await db.commit()

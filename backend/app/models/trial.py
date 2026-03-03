@@ -32,6 +32,7 @@ class Trial(Base):
     ctg_candidate_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     ctg_candidate_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     ctg_candidate_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    ctg_candidate_pool: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     trial_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     document_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     ctg_match_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)

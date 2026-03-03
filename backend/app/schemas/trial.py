@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -49,6 +49,7 @@ class TrialRead(BaseModel):
     ctg_candidate_url: str | None
     ctg_candidate_title: str | None
     ctg_candidate_source: str | None
+    ctg_candidate_pool: list[dict[str, Any]] | None
     trial_title: str | None
     document_title: str | None
     ctg_match_confidence: float | None
@@ -108,6 +109,22 @@ class CtgSnapshotRead(BaseModel):
     pulled_at: datetime
 
 
+class CtgCandidateRead(BaseModel):
+    nct_id: str
+    title: str | None = None
+    url: str | None = None
+    confidence: float | None = None
+    source: str | None = None
+
+
+class CtgCandidateAcceptRequest(BaseModel):
+    nct_id: str | None = None
+    title: str | None = None
+    url: str | None = None
+    source: str | None = None
+    confidence: float | None = None
+
+
 class ParsedCriterion(BaseModel):
     type: CriteriaType
     text: str
@@ -149,6 +166,7 @@ class CriteriaReviewStatusRead(BaseModel):
 class QARequest(BaseModel):
     question: str = Field(min_length=1, max_length=5000)
     document_version: int | None = None
+    mode: Literal["brief", "detailed"] = "brief"
 
     @field_validator("question")
     @classmethod

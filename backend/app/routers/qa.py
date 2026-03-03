@@ -5,6 +5,7 @@ Passes full protocol text as context (no embeddings/RAG needed - Claude has long
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Annotated
@@ -35,6 +36,37 @@ Rules:
 - Quote relevant sections to support your answer
 - Be precise about dosing, timing, and eligibility criteria
 - Do not make assumptions or extrapolate beyond the text"""
+BRIEF_MODE_INSTRUCTIONS = """For this response, return plain bullet points only.
+- No markdown headers
+- No code blocks
+- Max 6 bullets
+- One concise fact per bullet"""
+
+
+def _strip_markdown_artifacts(answer: str | None) -> str:
+    if not answer:
+        return ""
+    cleaned_lines: list[str] = []
+    for raw_line in answer.splitlines():
+        line = re.sub(r"^\s*(?:#{1,3}|\*\*|```+)\s*", "", raw_line)
+        line = line.replace("**", "").replace("```", "")
+        cleaned_lines.append(line.rstrip())
+    cleaned = "\n".join(cleaned_lines).strip()
+    return re.sub(r"\n{3,}", "\n\n", cleaned)
+
+
+def _as_brief_bullets(answer: str) -> str:
+    candidates: list[str] = []
+    for line in answer.splitlines():
+        text = re.sub(r"^\s*(?:[-*•]\s+|\d+[.)]\s+)", "", line).strip()
+        if text:
+            candidates.append(text)
+
+    if not candidates and answer.strip():
+        sentence_candidates = re.split(r"(?<=[.!?])\s+", answer.strip())
+        candidates = [item.strip() for item in sentence_candidates if item.strip()]
+
+    return "\n".join(f"- {item}" for item in candidates[:6])
 
 
 async def _get_latest_protocol_text(trial_id: UUID, db: AsyncSession) -> str | None:
@@ -86,7 +118,7 @@ async def protocol_qa(
                 "content": f"Protocol text:\n\n{protocol_text[:150000]}\n\n---\n\nQuestion: {payload.question}",
             }
         ],
-        system=SYSTEM_PROMPT,
+        system=f"{SYSTEM_PROMPT}\n\n{BRIEF_MODE_INSTRUCTIONS}" if payload.mode == "brief" else SYSTEM_PROMPT,
         max_tokens=1024,
         model=settings.qa_model,
     )
@@ -97,8 +129,12 @@ async def protocol_qa(
             detail="LLM service unavailable - check OPENCLAW_GATEWAY_TOKEN",
         )
 
+    cleaned_answer = _strip_markdown_artifacts(answer)
+    if payload.mode == "brief":
+        cleaned_answer = _as_brief_bullets(cleaned_answer)
+
     return QAResponse(
-        answer=answer,
+        answer=cleaned_answer,
         sources=[],
         embeddings_pending=False,
         model="openclaw-gateway",

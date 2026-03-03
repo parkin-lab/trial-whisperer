@@ -8,26 +8,26 @@ from app.models.trial import Trial
 from app.schemas.awareness import AwarenessCardGenerateRequest, AwarenessCardResponse, AwarenessCardVisual
 from app.services.llm import chat_completion
 
-PLACEHOLDER = "TBD"
 MAX_LINE_LENGTH = 120
-MAX_VISUAL_LINES = 7
+MAX_VISUAL_LINES = 4
 
-_SYSTEM_PROMPT = """You write concise, trial-level awareness cards for clinicians.
-Return JSON only with keys "why_it_matters" and "when_to_think".
-Each value must be one sentence, neutral tone, no patient-fit language."""
-
-
-def _string_or_placeholder(value: str | None) -> str:
-    cleaned = (value or "").strip()
-    return cleaned if cleaned else PLACEHOLDER
+_SYSTEM_PROMPT = """You write concise trial-awareness snippets for clinicians.
+Return JSON only with key \"trial_purpose\".
+Value must be one neutral sentence, no labels, no markdown."""
 
 
-def _enum_to_text(value: object) -> str:
+def _clean_optional(value: str | None) -> str | None:
+    cleaned = re.sub(r"\s+", " ", (value or "").strip())
+    return cleaned or None
+
+
+def _enum_to_text(value: object) -> str | None:
     if value is None:
-        return PLACEHOLDER
+        return None
     if hasattr(value, "value"):
-        return str(getattr(value, "value")).strip() or PLACEHOLDER
-    return _string_or_placeholder(str(value))
+        cleaned = _clean_optional(str(getattr(value, "value")))
+        return cleaned
+    return _clean_optional(str(value))
 
 
 def _truncate_line(value: str, limit: int = MAX_LINE_LENGTH) -> str:
@@ -40,14 +40,37 @@ def _truncate_line(value: str, limit: int = MAX_LINE_LENGTH) -> str:
 
 
 def _cap_lines(lines: Sequence[str]) -> list[str]:
-    return [_truncate_line(line) for line in list(lines)[:MAX_VISUAL_LINES]]
+    capped: list[str] = []
+    for line in lines:
+        cleaned = _clean_optional(line)
+        if not cleaned:
+            continue
+        capped.append(_truncate_line(cleaned))
+        if len(capped) >= MAX_VISUAL_LINES:
+            break
+    return capped
 
 
-def _build_subtitle(indication: str, phase: str, nct_id: str) -> str:
-    return _truncate_line(f"{indication} | {phase} | {nct_id}")
+def _clean_title(value: str | None, fallback: str | None) -> str:
+    source = _clean_optional(value) or _clean_optional(fallback) or "Trial"
+    source = re.sub(r"^protocol(?:\s+synopsis)?\s*[:\-]\s*", "", source, flags=re.IGNORECASE)
+    return _truncate_line(source)
 
 
-def _infer_intervention_class(*, title: str | None, document_title: str | None) -> str | None:
+def _build_subtitle(indication: str | None, phase: str | None, nct_id: str | None) -> str:
+    parts: list[str] = []
+    if indication:
+        parts.append(indication.upper())
+    if phase:
+        parts.append(phase)
+    if nct_id:
+        parts.append(nct_id)
+    if not parts:
+        return ""
+    return _truncate_line(" | ".join(parts))
+
+
+def _infer_mechanism_phrase(*, title: str | None, document_title: str | None) -> str | None:
     source = f"{title or ''} {document_title or ''}".lower()
     if not source.strip():
         return None
@@ -65,21 +88,6 @@ def _infer_intervention_class(*, title: str | None, document_title: str | None) 
     if "cell therapy" in source:
         return "Cell therapy"
     return None
-
-
-def _build_trial_detail_line(*, title: str | None, phase: str | None, sponsor: str | None, nct_id: str | None) -> str:
-    segments: list[str] = []
-    if title and title.strip():
-        segments.append(f"Trial title: {title.strip()}")
-    if phase and phase.strip():
-        segments.append(f"Phase: {phase.strip()}")
-    if sponsor and sponsor.strip():
-        segments.append(f"Sponsor: {sponsor.strip()}")
-    if nct_id and nct_id.strip():
-        segments.append(f"NCT: {nct_id.strip()}")
-    if not segments:
-        return "Trial details: TBD"
-    return _truncate_line(" | ".join(segments))
 
 
 def _parse_llm_json(response_text: str | None) -> dict[str, str]:
@@ -102,94 +110,77 @@ def _parse_llm_json(response_text: str | None) -> dict[str, str]:
     return {}
 
 
-async def _generate_missing_fields(context_fields: dict[str, str]) -> dict[str, str]:
+async def _generate_trial_purpose(context_fields: dict[str, str]) -> str | None:
     user_prompt = (
-        "Generate awareness text for this trial context.\n"
+        "Generate one concise trial-purpose line from this context.\n"
         "Return JSON only.\n"
         f"{json.dumps(context_fields, ensure_ascii=True)}"
     )
     response = await chat_completion(
         messages=[{"role": "user", "content": user_prompt}],
         system=_SYSTEM_PROMPT,
-        max_tokens=300,
+        max_tokens=120,
     )
     parsed = _parse_llm_json(response)
-    return {
-        "why_it_matters": _string_or_placeholder(parsed.get("why_it_matters")),
-        "when_to_think": _string_or_placeholder(parsed.get("when_to_think")),
-    }
+    return _clean_optional(parsed.get("trial_purpose"))
 
 
 async def build_awareness_card(trial: Trial, overrides: AwarenessCardGenerateRequest) -> AwarenessCardResponse:
-    indication = _enum_to_text(trial.indication)
-    title = _string_or_placeholder(trial.trial_title or trial.document_title)
-    phase = _string_or_placeholder(trial.phase)
-    sponsor = _string_or_placeholder(trial.sponsor)
-    nct_id = _string_or_placeholder(trial.nct_id)
-    intervention_class = _infer_intervention_class(title=trial.trial_title, document_title=trial.document_title)
+    title = _clean_title(trial.trial_title or trial.document_title, trial.nickname)
+    indication = _clean_optional(overrides.disease_setting) or _enum_to_text(trial.indication)
+    phase = _clean_optional(trial.phase)
+    nct_id = _clean_optional(trial.nct_id)
 
-    fields = {
-        "title": _truncate_line(title),
-        "indication": _truncate_line(indication),
-        "phase": _truncate_line(phase),
-        "sponsor": _truncate_line(sponsor),
-        "nct_id": _truncate_line(nct_id),
-        "disease_setting": _truncate_line(overrides.disease_setting or indication),
-        "intervention_class": _truncate_line(overrides.intervention_class or intervention_class or PLACEHOLDER),
-        "why_it_matters": _truncate_line(overrides.why_it_matters or ""),
-        "when_to_think": _truncate_line(overrides.when_to_think or ""),
-        "referral_contact": _truncate_line(overrides.referral_contact or PLACEHOLDER),
-    }
+    subtitle = _build_subtitle(indication, phase, nct_id)
 
-    needs_llm = not overrides.why_it_matters or not overrides.when_to_think
-    if needs_llm:
-        generated = await _generate_missing_fields(
+    mechanism = _clean_optional(overrides.mechanism)
+    if not mechanism:
+        mechanism = _clean_optional(overrides.intervention_class)
+    if not mechanism:
+        mechanism = _clean_optional(_infer_mechanism_phrase(title=trial.trial_title, document_title=trial.document_title))
+
+    trial_purpose = _clean_optional(overrides.trial_purpose)
+    if not trial_purpose:
+        trial_purpose = _clean_optional(overrides.why_it_matters)
+    if not trial_purpose:
+        trial_purpose = _clean_optional(overrides.when_to_think)
+    if not trial_purpose:
+        trial_purpose = await _generate_trial_purpose(
             {
-                "title": fields["title"],
-                "indication": fields["indication"],
-                "phase": fields["phase"],
-                "sponsor": fields["sponsor"],
-                "nct_id": fields["nct_id"],
-                "disease_setting": fields["disease_setting"],
-                "intervention_class": fields["intervention_class"],
+                "title": title,
+                "indication": indication or "",
+                "phase": phase or "",
+                "nct_id": nct_id or "",
+                "mechanism": mechanism or "",
             }
         )
-        if not overrides.why_it_matters:
-            fields["why_it_matters"] = _truncate_line(generated["why_it_matters"])
-        if not overrides.when_to_think:
-            fields["when_to_think"] = _truncate_line(generated["when_to_think"])
 
-    fields["why_it_matters"] = _string_or_placeholder(fields["why_it_matters"])
-    fields["when_to_think"] = _string_or_placeholder(fields["when_to_think"])
-
-    visual_lines = _cap_lines(
-        [
-            f"Disease setting: {fields['disease_setting']}",
-            f"Intervention class: {fields['intervention_class']}",
-            f"Why it matters: {fields['why_it_matters']}",
-            f"When to think: {fields['when_to_think']}",
-            f"Sponsor: {fields['sponsor']}",
-            f"Referral contact: {fields['referral_contact']}",
-        ]
-    )
+    lines = _cap_lines([mechanism or "", trial_purpose or ""])
 
     visual = AwarenessCardVisual(
-        title=fields["title"],
-        subtitle=_build_subtitle(fields["indication"], fields["phase"], fields["nct_id"]),
-        lines=visual_lines,
+        title=title,
+        subtitle=subtitle,
+        lines=lines,
     )
 
-    text_card = "\n".join(
-        [
-            visual.title,
-            visual.subtitle,
-            _build_trial_detail_line(
-                title=trial.trial_title or trial.document_title,
-                phase=trial.phase,
-                sponsor=trial.sponsor,
-                nct_id=trial.nct_id,
-            ),
-            *visual.lines,
-        ]
-    )
+    text_lines: list[str] = [visual.title]
+    if visual.subtitle and visual.subtitle not in text_lines:
+        text_lines.append(visual.subtitle)
+    for line in visual.lines:
+        if line and line not in text_lines:
+            text_lines.append(line)
+
+    fields: dict[str, str] = {"title": visual.title}
+    if indication:
+        fields["indication"] = indication
+    if phase:
+        fields["phase"] = phase
+    if nct_id:
+        fields["nct_id"] = nct_id
+    if mechanism:
+        fields["mechanism"] = _truncate_line(mechanism)
+    if trial_purpose:
+        fields["trial_purpose"] = _truncate_line(trial_purpose)
+
+    text_card = "\n".join(text_lines)
     return AwarenessCardResponse(text_card=text_card, visual=visual, fields=fields)

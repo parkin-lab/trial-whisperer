@@ -1,11 +1,21 @@
 import { useEffect, useState } from 'react'
 import api from '../lib/api'
 
+function parseBulletLines(answer) {
+  if (!answer) return []
+  return answer
+    .split('\n')
+    .map((line) => line.replace(/^\s*(?:[-*•]\s+|\d+[.)]\s+)/, '').trim())
+    .filter(Boolean)
+    .slice(0, 6)
+}
+
 export default function ProtocolQA({ trialId }) {
   const [statusData, setStatusData] = useState(null)
   const [statusError, setStatusError] = useState('')
   const [statusLoading, setStatusLoading] = useState(false)
   const [question, setQuestion] = useState('')
+  const [mode, setMode] = useState('brief')
   const [history, setHistory] = useState([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -28,6 +38,7 @@ export default function ProtocolQA({ trialId }) {
     setHistory([])
     setQuestion('')
     setError('')
+    setMode('brief')
     loadStatus()
   }, [trialId])
 
@@ -41,6 +52,7 @@ export default function ProtocolQA({ trialId }) {
       const res = await api.post(`/trials/${trialId}/qa`, {
         question: prompt,
         document_version: null,
+        mode,
       })
       const data = res.data
       setHistory((prev) => [
@@ -52,6 +64,7 @@ export default function ProtocolQA({ trialId }) {
           sources: data.sources || [],
           embeddings_pending: Boolean(data.embeddings_pending),
           model: data.model || '',
+          mode,
         },
       ])
       setQuestion('')
@@ -94,8 +107,24 @@ export default function ProtocolQA({ trialId }) {
                   <span className="font-semibold">Question:</span> {item.question}
                 </div>
                 <div className="text-sm text-slate-800">
-                  <span className="font-semibold">Answer:</span>{' '}
-                  {item.answer || (item.embeddings_pending ? 'Protocol indexing is still in progress.' : 'No answer returned.')}
+                  <span className="font-semibold">Answer:</span>
+                  {item.mode === 'brief' ? (
+                    parseBulletLines(item.answer).length > 0 ? (
+                      <ul className="mt-2 list-disc space-y-1 pl-5">
+                        {parseBulletLines(item.answer).map((line, idx) => (
+                          <li key={`${item.id}-${idx}`}>{line}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-1 whitespace-pre-wrap">
+                        {item.answer || (item.embeddings_pending ? 'Protocol indexing is still in progress.' : 'No answer returned.')}
+                      </p>
+                    )
+                  ) : (
+                    <p className="mt-1 whitespace-pre-wrap">
+                      {item.answer || (item.embeddings_pending ? 'Protocol indexing is still in progress.' : 'No answer returned.')}
+                    </p>
+                  )}
                 </div>
                 {item.sources.length > 0 && (
                   <details className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-sm">
@@ -125,6 +154,18 @@ export default function ProtocolQA({ trialId }) {
       )}
 
       <div className="rounded-xl border border-slate-200 bg-white p-4">
+        <div className="mb-3 inline-flex rounded-lg border border-slate-300 p-1">
+          {['brief', 'detailed'].map((value) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setMode(value)}
+              className={`rounded-md px-3 py-1 text-xs ${mode === value ? 'bg-ink text-white' : 'text-slate-700'}`}
+            >
+              {value === 'brief' ? 'Brief' : 'Detailed'}
+            </button>
+          ))}
+        </div>
         <label className="text-sm font-medium text-slate-700" htmlFor="protocol-question">
           Ask about the current protocol
         </label>

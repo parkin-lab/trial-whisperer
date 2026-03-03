@@ -31,7 +31,7 @@ async def test_generate_awareness_card_with_full_trial_metadata(monkeypatch):
 
     async def _mock_chat_completion(*args, **kwargs):
         del args, kwargs
-        return '{"why_it_matters":"Offers novel mechanism in relapsed disease.","when_to_think":"Consider after standard options are exhausted."}'
+        return '{"trial_purpose":"Evaluate efficacy and safety in relapsed disease."}'
 
     monkeypatch.setattr(awareness_card, "chat_completion", _mock_chat_completion)
 
@@ -39,26 +39,21 @@ async def test_generate_awareness_card_with_full_trial_metadata(monkeypatch):
         trial,
         AwarenessCardGenerateRequest(
             disease_setting="Relapsed/refractory AML",
-            intervention_class="Targeted therapy",
-            referral_contact="trial-team@example.org",
+            mechanism="Targeted therapy",
         ),
     )
 
-    assert card.fields["title"] == "Phase 2 Study of XYZ in AML"
-    assert card.fields["indication"] == "aml"
-    assert card.fields["phase"] == "Phase 2"
-    assert card.fields["sponsor"] == "Trial Sponsor"
-    assert card.fields["nct_id"] == "NCT12345678"
-    assert card.fields["why_it_matters"] == "Offers novel mechanism in relapsed disease."
-    assert card.fields["when_to_think"] == "Consider after standard options are exhausted."
-    assert "Trial title: Phase 2 Study of XYZ in AML" in card.text_card
-    assert "Phase: Phase 2" in card.text_card
-    assert "Sponsor: Trial Sponsor" in card.text_card
-    assert "NCT: NCT12345678" in card.text_card
-    assert card.text_card
+    lines = card.text_card.splitlines()
+    assert lines[0] == "Phase 2 Study of XYZ in AML"
+    assert lines[1] == "RELAPSED/REFRACTORY AML | Phase 2 | NCT12345678"
+    assert lines[2] == "Targeted therapy"
+    assert lines[3] == "Evaluate efficacy and safety in relapsed disease."
+    assert all("TBD" not in line for line in lines)
+    assert card.fields["mechanism"] == "Targeted therapy"
+    assert card.fields["trial_purpose"] == "Evaluate efficacy and safety in relapsed disease."
 
 
-async def test_generate_awareness_card_uses_placeholders_for_missing_metadata(monkeypatch):
+async def test_generate_awareness_card_omits_optional_lines_when_missing(monkeypatch):
     trial = _trial(
         trial_title=None,
         nct_id=None,
@@ -75,28 +70,24 @@ async def test_generate_awareness_card_uses_placeholders_for_missing_metadata(mo
 
     card = await awareness_card.build_awareness_card(trial, AwarenessCardGenerateRequest())
 
-    assert card.fields["title"] == "TBD"
-    assert card.fields["indication"] == "TBD"
-    assert card.fields["phase"] == "TBD"
-    assert card.fields["sponsor"] == "TBD"
-    assert card.fields["nct_id"] == "TBD"
-    assert card.fields["why_it_matters"] == "TBD"
-    assert card.fields["when_to_think"] == "TBD"
-    assert "Trial details: TBD" in card.text_card
+    assert card.text_card == "Awareness Trial"
+    assert card.visual.subtitle == ""
+    assert card.visual.lines == []
+    assert "TBD" not in card.text_card
 
 
-async def test_generate_awareness_card_derives_intervention_class_from_title(monkeypatch):
+async def test_generate_awareness_card_derives_mechanism_from_title(monkeypatch):
     trial = _trial(trial_title="A Phase 2 Study of CAR-T Therapy in AML")
 
     async def _mock_chat_completion(*args, **kwargs):
         del args, kwargs
-        return '{"why_it_matters":"Potentially novel mechanism.","when_to_think":"Consider per protocol timing."}'
+        return '{"trial_purpose":"Assess activity in adults with relapsed AML."}'
 
     monkeypatch.setattr(awareness_card, "chat_completion", _mock_chat_completion)
 
     card = await awareness_card.build_awareness_card(trial, AwarenessCardGenerateRequest())
 
-    assert card.fields["intervention_class"] == "CAR-T cell therapy"
+    assert card.fields["mechanism"] == "CAR-T cell therapy"
 
 
 async def test_generate_awareness_card_enforces_visual_line_length():
@@ -106,13 +97,10 @@ async def test_generate_awareness_card_enforces_visual_line_length():
     card = await awareness_card.build_awareness_card(
         trial,
         AwarenessCardGenerateRequest(
-            disease_setting=long_text,
-            intervention_class=long_text,
-            why_it_matters=long_text,
-            when_to_think=long_text,
-            referral_contact=long_text,
+            mechanism=long_text,
+            trial_purpose=long_text,
         ),
     )
 
-    assert len(card.visual.lines) <= 7
+    assert len(card.visual.lines) <= 4
     assert all(len(line) <= 120 for line in card.visual.lines)

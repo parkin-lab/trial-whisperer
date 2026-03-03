@@ -3,6 +3,8 @@ from pydantic import BaseModel, field_validator
 
 class AwarenessCardGenerateRequest(BaseModel):
     disease_setting: str | None = None
+    mechanism: str | None = None
+    trial_purpose: str | None = None
     intervention_class: str | None = None
     why_it_matters: str | None = None
     when_to_think: str | None = None
@@ -10,6 +12,8 @@ class AwarenessCardGenerateRequest(BaseModel):
 
     @field_validator(
         "disease_setting",
+        "mechanism",
+        "trial_purpose",
         "intervention_class",
         "why_it_matters",
         "when_to_think",

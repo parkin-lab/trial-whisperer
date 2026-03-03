@@ -12,12 +12,6 @@ const confidenceClass = {
   needs_review: 'bg-amber-100 text-amber-800',
 }
 
-const approvalClass = {
-  approved: 'bg-emerald-100 text-emerald-800',
-  pending: 'bg-slate-200 text-slate-700',
-  manual: 'bg-amber-100 text-amber-800',
-}
-
 const extractionStatusClass = {
   processing: 'bg-sky-100 text-sky-800',
   ready: 'bg-emerald-100 text-emerald-800',
@@ -28,6 +22,26 @@ function truncateSummary(value, maxLength = 180) {
   if (!value) return ''
   if (value.length <= maxLength) return value
   return `${value.slice(0, maxLength)}...`
+}
+
+function collectExpressionFields(expression, acc = new Set()) {
+  if (!expression || typeof expression !== 'object') return acc
+  if (typeof expression.field === 'string' && expression.field.trim()) {
+    acc.add(expression.field.trim())
+  }
+  if (Array.isArray(expression.operands)) {
+    expression.operands.forEach((item) => collectExpressionFields(item, acc))
+  }
+  return acc
+}
+
+function expressionPreview(expression) {
+  if (!expression || typeof expression !== 'object') return 'N/A'
+  const op = typeof expression.op === 'string' ? expression.op : 'expression'
+  const field = typeof expression.field === 'string' ? expression.field : ''
+  const value = Object.prototype.hasOwnProperty.call(expression, 'value') ? String(expression.value) : ''
+  const summary = [op, field && `(${field})`, value && `= ${value}`].filter(Boolean).join(' ')
+  return summary.length > 96 ? `${summary.slice(0, 96)}...` : summary
 }
 
 export default function TrialDetail({ onLogout }) {
@@ -41,6 +55,7 @@ export default function TrialDetail({ onLogout }) {
   const [amendments, setAmendments] = useState([])
   const [snapshots, setSnapshots] = useState([])
   const [criteria, setCriteria] = useState([])
+  const [criteriaView, setCriteriaView] = useState('all')
   const [reviewStatus, setReviewStatus] = useState(null)
   const [criteriaError, setCriteriaError] = useState('')
   const [uploadOpen, setUploadOpen] = useState(false)
@@ -59,6 +74,7 @@ export default function TrialDetail({ onLogout }) {
   const [trialError, setTrialError] = useState('')
   const [candidateBusy, setCandidateBusy] = useState(false)
   const [candidateError, setCandidateError] = useState('')
+  const [ctgCandidates, setCtgCandidates] = useState([])
   const [metadataForm, setMetadataForm] = useState({
     nickname: '',
     trial_title: '',
@@ -112,6 +128,15 @@ export default function TrialDetail({ onLogout }) {
     setSnapshots(snapshotRes.data ? [snapshotRes.data] : [])
   }
 
+  const loadCtgCandidates = async () => {
+    try {
+      const res = await api.get(`/trials/${id}/ctg/candidates`)
+      setCtgCandidates(Array.isArray(res.data) ? res.data.slice(0, 3) : [])
+    } catch {
+      setCtgCandidates([])
+    }
+  }
+
   const loadCriteria = async () => {
     try {
       const [criteriaRes, statusRes] = await Promise.all([
@@ -138,7 +163,7 @@ export default function TrialDetail({ onLogout }) {
   }
 
   const load = async () => {
-    await Promise.all([loadTrialData(), loadCriteria(), loadQaStatus()])
+    await Promise.all([loadTrialData(), loadCriteria(), loadQaStatus(), loadCtgCandidates()])
   }
 
   useEffect(() => {
@@ -164,6 +189,11 @@ export default function TrialDetail({ onLogout }) {
       sponsor: trial.sponsor || '',
     })
   }, [trial])
+
+  const filteredCriteria = useMemo(() => {
+    if (criteriaView === 'all') return criteria
+    return criteria.filter((row) => row.type === criteriaView)
+  }, [criteria, criteriaView])
 
   const parseCriteria = async () => {
     setCriteriaBusy(true)
@@ -199,6 +229,23 @@ export default function TrialDetail({ onLogout }) {
       await loadCriteria()
     } catch (err) {
       setCriteriaError(err.response?.data?.detail || 'Bulk approve failed.')
+    } finally {
+      setCriteriaBusy(false)
+    }
+  }
+
+  const deleteCriterion = async (criterionId) => {
+    if (!canReview || criteriaBusy) return
+    const confirmed = window.confirm('Delete this criterion?')
+    if (!confirmed) return
+
+    setCriteriaBusy(true)
+    setCriteriaError('')
+    try {
+      await api.delete(`/trials/${id}/criteria/${criterionId}`)
+      await loadCriteria()
+    } catch (err) {
+      setCriteriaError(err.response?.data?.detail || 'Delete failed.')
     } finally {
       setCriteriaBusy(false)
     }
@@ -266,13 +313,22 @@ export default function TrialDetail({ onLogout }) {
     }
   }
 
-  const acceptCtgCandidate = async () => {
+  const acceptCtgCandidate = async (candidate = null) => {
     if (!canEditMetadata) return
     setCandidateBusy(true)
     setCandidateError('')
     try {
-      await api.post(`/trials/${id}/ctg/accept-candidate`)
-      await loadTrialData()
+      const payload = candidate?.nct_id
+        ? {
+            nct_id: candidate.nct_id,
+            title: candidate.title || null,
+            url: candidate.url || null,
+            source: candidate.source || null,
+            confidence: typeof candidate.confidence === 'number' ? candidate.confidence : null,
+          }
+        : {}
+      await api.post(`/trials/${id}/ctg/accept-candidate`, payload)
+      await Promise.all([loadTrialData(), loadCtgCandidates()])
     } catch (err) {
       setCandidateError(err.response?.data?.detail || 'Could not accept CTG candidate.')
     } finally {
@@ -546,7 +602,57 @@ export default function TrialDetail({ onLogout }) {
                 <span className="font-medium">CTG match note:</span> {trial.ctg_match_note || 'N/A'}
               </div>
             </div>
-            {!trial.nct_id && (trial.ctg_candidate_nct_id || trial.ctg_candidate_title || trial.ctg_candidate_url) && (
+            {!trial.nct_id && ctgCandidates.length > 0 && (
+              <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                <p className="font-semibold">CTG candidates require manual review</p>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  {ctgCandidates.map((candidate) => (
+                    <div key={`${candidate.nct_id}-${candidate.source || 'source'}`} className="rounded-lg border border-amber-300 bg-white p-3">
+                      <p>
+                        <span className="font-medium">NCT:</span> {candidate.nct_id}
+                      </p>
+                      <p className="mt-1">
+                        <span className="font-medium">Title:</span> {candidate.title || 'N/A'}
+                      </p>
+                      <p className="mt-1">
+                        <span className="font-medium">Source:</span> {candidate.source || 'N/A'}
+                      </p>
+                      <p className="mt-1">
+                        <span className="font-medium">Confidence:</span>{' '}
+                        {typeof candidate.confidence === 'number'
+                          ? candidate.confidence.toFixed(2)
+                          : typeof trial.ctg_match_confidence === 'number'
+                            ? trial.ctg_match_confidence.toFixed(2)
+                            : 'N/A'}
+                      </p>
+                      {candidate.url && (
+                        <a
+                          className="mt-2 inline-flex text-xs text-sky-700 hover:underline"
+                          href={candidate.url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Open on ClinicalTrials.gov
+                        </a>
+                      )}
+                      {canEditMetadata && (
+                        <div className="mt-3">
+                          <button
+                            className="rounded-lg bg-ink px-3 py-2 text-sm text-white disabled:opacity-50"
+                            onClick={() => acceptCtgCandidate(candidate)}
+                            disabled={candidateBusy}
+                          >
+                            {candidateBusy ? 'Accepting...' : 'Accept'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {candidateError && <p className="mt-2 text-sm text-rose-700">{candidateError}</p>}
+              </div>
+            )}
+            {!trial.nct_id && ctgCandidates.length === 0 && (trial.ctg_candidate_nct_id || trial.ctg_candidate_title || trial.ctg_candidate_url) && (
               <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
                 <p className="font-semibold">CTG candidate requires manual review</p>
                 <p className="mt-1">
@@ -576,7 +682,7 @@ export default function TrialDetail({ onLogout }) {
                   <div className="mt-3">
                     <button
                       className="rounded-lg bg-ink px-3 py-2 text-sm text-white disabled:opacity-50"
-                      onClick={acceptCtgCandidate}
+                      onClick={() => acceptCtgCandidate(null)}
                       disabled={candidateBusy}
                     >
                       {candidateBusy ? 'Accepting...' : 'Accept Candidate'}
@@ -697,6 +803,23 @@ export default function TrialDetail({ onLogout }) {
               </div>
             )}
 
+            <div className="mt-3 inline-flex rounded-lg border border-slate-300 p-1">
+              {[
+                { value: 'inclusion', label: 'Inclusion' },
+                { value: 'exclusion', label: 'Exclusion' },
+                { value: 'all', label: 'All' },
+              ].map((tab) => (
+                <button
+                  key={tab.value}
+                  type="button"
+                  onClick={() => setCriteriaView(tab.value)}
+                  className={`rounded-md px-3 py-1 text-xs ${criteriaView === tab.value ? 'bg-ink text-white' : 'text-slate-700'}`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
             {criteriaError && (
               <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
                 {criteriaError}
@@ -707,23 +830,28 @@ export default function TrialDetail({ onLogout }) {
               <table className="min-w-full text-sm">
                 <thead className="bg-slate-50 text-left text-slate-600">
                   <tr>
-                    <th className="px-4 py-3">Raw text</th>
-                    <th className="px-4 py-3">Expression</th>
+                    <th className="px-4 py-3">Type</th>
+                    <th className="px-4 py-3">Criterion text</th>
+                    <th className="px-4 py-3">Variable(s)</th>
+                    <th className="px-4 py-3">Expression preview</th>
                     <th className="px-4 py-3">Confidence</th>
-                    <th className="px-4 py-3">Approval</th>
-                    {canReview && <th className="px-4 py-3">Actions</th>}
+                    <th className="px-4 py-3">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {criteria.map((row) => {
-                    const approvalStatus = row.approved_at ? 'approved' : row.manual_review_required ? 'manual' : 'pending'
+                  {filteredCriteria.map((row) => {
+                    const variables = Array.from(collectExpressionFields(row.expression))
                     return (
                       <tr key={row.id} className="border-t border-slate-100 align-top">
+                        <td className="px-4 py-3">
+                          <span className="badge bg-slate-100 text-slate-700">{row.type}</span>
+                        </td>
                         <td className="px-4 py-3">{row.text}</td>
                         <td className="px-4 py-3">
-                          <pre className="max-w-md overflow-auto whitespace-pre-wrap rounded bg-fog p-2 text-xs text-slate-700">
-                            {JSON.stringify(row.expression, null, 2)}
-                          </pre>
+                          {variables.length > 0 ? variables.join(', ') : 'N/A'}
+                        </td>
+                        <td className="px-4 py-3 text-xs text-slate-700">
+                          {expressionPreview(row.expression)}
                         </td>
                         <td className="px-4 py-3">
                           <span className={`badge ${confidenceClass[row.confidence] || 'bg-slate-100 text-slate-700'}`}>
@@ -731,22 +859,20 @@ export default function TrialDetail({ onLogout }) {
                           </span>
                         </td>
                         <td className="px-4 py-3">
-                          <span className={`badge ${approvalClass[approvalStatus] || 'bg-slate-100 text-slate-700'}`}>
-                            {approvalStatus === 'approved'
-                              ? 'Approved'
-                              : approvalStatus === 'manual'
-                                ? 'Manual Review Flagged'
-                                : 'Pending'}
-                          </span>
-                        </td>
-                        {canReview && (
-                          <td className="px-4 py-3">
+                          {canReview ? (
                             <div className="flex flex-wrap gap-2">
                               <button
                                 className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
                                 onClick={() => openEdit(row)}
                               >
-                                Edit Expression
+                                Edit
+                              </button>
+                              <button
+                                className="rounded-lg border border-rose-300 px-2 py-1 text-xs text-rose-700"
+                                onClick={() => deleteCriterion(row.id)}
+                                disabled={criteriaBusy}
+                              >
+                                Delete
                               </button>
                               {!row.approved_at && (
                                 <button
@@ -758,14 +884,16 @@ export default function TrialDetail({ onLogout }) {
                                 </button>
                               )}
                             </div>
-                          </td>
-                        )}
+                          ) : (
+                            <span className="text-xs text-slate-500">No actions available</span>
+                          )}
+                        </td>
                       </tr>
                     )
                   })}
                 </tbody>
               </table>
-              {criteria.length === 0 && <div className="p-4 text-sm text-slate-500">No criteria parsed yet.</div>}
+              {filteredCriteria.length === 0 && <div className="p-4 text-sm text-slate-500">No criteria in this view.</div>}
             </div>
           </div>
         </div>
@@ -921,6 +1049,8 @@ export default function TrialDetail({ onLogout }) {
     canArchive,
     canDelete,
     criteria,
+    filteredCriteria,
+    criteriaView,
     reviewStatus,
     criteriaError,
     criteriaBusy,
@@ -934,6 +1064,7 @@ export default function TrialDetail({ onLogout }) {
     id,
     trialBusy,
     trialError,
+    ctgCandidates,
     candidateBusy,
     candidateError,
     documentsByVersion,
