@@ -1,6 +1,6 @@
 """convert ctg candidate pool to jsonb on postgres
 
-Revision ID: 0009
+Revision ID: 0010
 Revises: 0008
 Create Date: 2026-03-03
 """
@@ -9,8 +9,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0009"
-down_revision = "0008"
+revision = "0010"
+down_revision = "0009"
 branch_labels = None
 depends_on = None
 
