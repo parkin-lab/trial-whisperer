@@ -2,11 +2,12 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.models.enums import Indication, JobStatus, TrialExtractionStatus, TrialStatus, UserRole
-from app.models.trial import BackgroundJob, Trial, TrialDocument
+from app.models.enums import ConfidenceLevel, CriteriaType, Indication, JobStatus, TrialExtractionStatus, TrialStatus, UserRole
+from app.models.trial import BackgroundJob, Trial, TrialCriteria, TrialDocument
 from app.models.user import User
 from app.routers import trials as trials_router
 from app.services.auth import hash_password
+from app.services.criteria_parser import ParsedCriterion
 from app.services.trial_metadata import TrialMetadataExtraction
 from app.workers import tasks
 
@@ -247,11 +248,16 @@ async def test_ctg_title_fallback_auto_fills_nct_when_confidence_high(db_session
             }
         ]
 
+    async def _search_web(*args, **kwargs):
+        del args, kwargs
+        return []
+
     monkeypatch.setattr(tasks, "storage_download_file", _download_file)
     monkeypatch.setattr(tasks, "get_local_path_for_extraction", lambda file_path, contents: file_path)
     monkeypatch.setattr(tasks, "extract_text", lambda _: "mock protocol text")
     monkeypatch.setattr(tasks, "extract_trial_metadata_from_text", _extract_metadata)
     monkeypatch.setattr(tasks, "search_studies", _search_studies)
+    monkeypatch.setattr(tasks, "search_web", _search_web)
 
     await tasks.parse_trial_document({}, str(job.id))
 
@@ -260,12 +266,10 @@ async def test_ctg_title_fallback_auto_fills_nct_when_confidence_high(db_session
     assert updated_trial.nct_id == "NCT77778888"
     assert updated_trial.ctg_url == "https://clinicaltrials.gov/study/NCT77778888"
     assert updated_trial.ctg_match_confidence == pytest.approx(1.0)
-    assert updated_trial.ctg_match_note == "Auto-matched from title search"
-    assert search_queries == [
-        "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia",
-        "Randomized Open-Label Multicenter Study of CAR-T in Patients with AML",
-        "Protocol Synopsis",
-    ]
+    assert updated_trial.ctg_match_note == "Auto-matched from CTG title search"
+    assert "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia" in search_queries
+    assert "Randomized Open-Label Multicenter Study of CAR-T in Patients with AML" in search_queries
+    assert "Protocol Synopsis" in search_queries
     assert updated_trial.extraction_status == TrialExtractionStatus.ready
 
 
@@ -333,11 +337,16 @@ async def test_ctg_title_fallback_low_confidence_needs_manual_review(db_session,
             }
         ]
 
+    async def _search_web(*args, **kwargs):
+        del args, kwargs
+        return []
+
     monkeypatch.setattr(tasks, "storage_download_file", _download_file)
     monkeypatch.setattr(tasks, "get_local_path_for_extraction", lambda file_path, contents: file_path)
     monkeypatch.setattr(tasks, "extract_text", lambda _: "mock protocol text")
     monkeypatch.setattr(tasks, "extract_trial_metadata_from_text", _extract_metadata)
     monkeypatch.setattr(tasks, "search_studies", _search_studies)
+    monkeypatch.setattr(tasks, "search_web", _search_web)
 
     await tasks.parse_trial_document({}, str(job.id))
 
@@ -346,9 +355,314 @@ async def test_ctg_title_fallback_low_confidence_needs_manual_review(db_session,
     assert updated_trial.nct_id is None
     assert updated_trial.ctg_match_confidence == pytest.approx(0.0)
     assert updated_trial.ctg_match_note == "Candidate found; manual review recommended"
-    assert search_queries == [
-        "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia",
-        "Open-Label Study in Patients with AML",
-        "Protocol Header",
-    ]
+    assert updated_trial.ctg_candidate_nct_id == "NCT00001111"
+    assert updated_trial.ctg_candidate_url == "https://clinicaltrials.gov/study/NCT00001111"
+    assert updated_trial.ctg_candidate_title == "Observational Registry for Long-Term Outcomes in Solid Tumors"
+    assert updated_trial.ctg_candidate_source == tasks.CTG_SOURCE_TITLE
+    assert "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia" in search_queries
+    assert "Open-Label Study in Patients with AML" in search_queries
+    assert "Protocol Header" in search_queries
     assert updated_trial.extraction_status == TrialExtractionStatus.needs_review
+
+
+async def test_accept_ctg_candidate_endpoint_promotes_candidate(client, db_session):
+    user = await _create_user(db_session, email="owner-accept@example.com", role=UserRole.owner)
+    token = await _login(client, user.email)
+
+    trial = Trial(
+        nickname="Candidate Accept Trial",
+        status=TrialStatus.draft,
+        extraction_status=TrialExtractionStatus.needs_review,
+        created_by=user.id,
+        ctg_candidate_nct_id="NCT12344321",
+        ctg_candidate_url="https://clinicaltrials.gov/study/NCT12344321",
+        ctg_candidate_title="A Phase 1 Study of Candidate Agent",
+        ctg_candidate_source=tasks.CTG_SOURCE_KEYWORD,
+        ctg_match_note="Candidate found; manual review recommended",
+        ctg_match_confidence=0.61,
+    )
+    db_session.add(trial)
+    await db_session.commit()
+    await db_session.refresh(trial)
+
+    res = await client.post(
+        f"/trials/{trial.id}/ctg/accept-candidate",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["nct_id"] == "NCT12344321"
+    assert payload["ctg_url"] == "https://clinicaltrials.gov/study/NCT12344321"
+    assert payload["trial_title"] == "A Phase 1 Study of Candidate Agent"
+    assert payload["ctg_match_note"] == "Candidate manually accepted"
+    assert payload["ctg_candidate_nct_id"] is None
+    assert payload["ctg_candidate_url"] is None
+    assert payload["ctg_candidate_title"] is None
+    assert payload["ctg_candidate_source"] is None
+
+
+async def test_parse_worker_auto_parses_criteria(db_session, monkeypatch):
+    user = await _create_user(db_session, email="pi8@example.com", role=UserRole.pi)
+    trial = Trial(
+        nickname="Criteria Parse Trial",
+        status=TrialStatus.draft,
+        extraction_status=TrialExtractionStatus.processing,
+        created_by=user.id,
+    )
+    db_session.add(trial)
+    await db_session.flush()
+
+    doc = TrialDocument(
+        trial_id=trial.id,
+        version=1,
+        filename="protocol.pdf",
+        file_path="/tmp/protocol-criteria.pdf",
+        uploaded_by=user.id,
+    )
+    db_session.add(doc)
+    await db_session.flush()
+
+    job = BackgroundJob(
+        type="parse_trial_document",
+        status=JobStatus.pending,
+        payload={"trial_id": str(trial.id), "document_id": str(doc.id), "file_path": doc.file_path},
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    testing_session_factory = async_sessionmaker(db_session.bind, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(tasks, "AsyncSessionLocal", testing_session_factory)
+
+    async def _download_file(file_path):
+        del file_path
+        return b"pdf bytes", "protocol.pdf"
+
+    async def _extract_metadata(text):
+        del text
+        return TrialMetadataExtraction(
+            indication=Indication.aml,
+            nct_id="NCT22223333",
+            ctg_url="https://clinicaltrials.gov/study/NCT22223333",
+            trial_title="A Phase 2 Study of XYZ in AML",
+            document_title="Protocol Header",
+            sponsor="City of Hope",
+            phase="Phase 2",
+        )
+
+    async def _parse_criteria(text):
+        del text
+        return [
+            ParsedCriterion(
+                type=CriteriaType.inclusion,
+                text="Age >= 18 years",
+                expression={"op": "gte", "field": "age", "value": 18, "unit": "years"},
+                confidence=ConfidenceLevel.high,
+                manual_review_required=False,
+            )
+        ]
+
+    monkeypatch.setattr(tasks, "storage_download_file", _download_file)
+    monkeypatch.setattr(tasks, "get_local_path_for_extraction", lambda file_path, contents: file_path)
+    monkeypatch.setattr(tasks, "extract_text", lambda _: "mock protocol text")
+    monkeypatch.setattr(tasks, "extract_trial_metadata_from_text", _extract_metadata)
+    monkeypatch.setattr(tasks, "parse_criteria_from_text", _parse_criteria)
+
+    await tasks.parse_trial_document({}, str(job.id))
+
+    criteria_rows = (
+        await db_session.execute(select(TrialCriteria).where(TrialCriteria.trial_id == trial.id))
+    ).scalars().all()
+    assert len(criteria_rows) == 1
+    criterion = criteria_rows[0]
+    assert criterion.document_version == 1
+    assert criterion.type == CriteriaType.inclusion
+    assert criterion.text == "Age >= 18 years"
+    assert criterion.confidence == ConfidenceLevel.high
+    assert criterion.approved_at is None
+
+
+async def test_ctg_title_miss_keyword_search_auto_fills_nct(db_session, monkeypatch):
+    user = await _create_user(db_session, email="pi6@example.com", role=UserRole.pi)
+    trial = Trial(
+        nickname="Keyword Resolver Trial",
+        status=TrialStatus.draft,
+        extraction_status=TrialExtractionStatus.processing,
+        created_by=user.id,
+    )
+    db_session.add(trial)
+    await db_session.flush()
+
+    doc = TrialDocument(
+        trial_id=trial.id,
+        version=1,
+        filename="protocol.pdf",
+        file_path="/tmp/protocol-keyword-fallback.pdf",
+        uploaded_by=user.id,
+    )
+    db_session.add(doc)
+    await db_session.flush()
+
+    job = BackgroundJob(
+        type="parse_trial_document",
+        status=JobStatus.pending,
+        payload={"trial_id": str(trial.id), "document_id": str(doc.id), "file_path": doc.file_path},
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    testing_session_factory = async_sessionmaker(db_session.bind, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(tasks, "AsyncSessionLocal", testing_session_factory)
+
+    async def _download_file(file_path):
+        del file_path
+        return b"pdf bytes", "protocol.pdf"
+
+    async def _extract_metadata(text):
+        del text
+        return TrialMetadataExtraction(
+            indication=Indication.aml,
+            sponsor="City of Hope",
+            phase="Phase 2",
+            trial_title="A Phase 2 Study of XYZ-101 in Relapsed AML",
+            document_title="Protocol Header",
+            title_candidates=[
+                "A Phase 2 Study of XYZ-101 in Relapsed AML",
+                "Open-Label Multicenter Trial in AML",
+            ],
+        )
+
+    search_queries: list[str] = []
+
+    async def _search_studies(query):
+        search_queries.append(query)
+        lowered = query.lower()
+        if "xyz-101" in lowered and "city" in lowered and "hope" in lowered:
+            return [
+                {
+                    "nctId": "NCT88889999",
+                    "officialTitle": "A Phase 2 Study of XYZ-101 in Relapsed AML",
+                    "phase": "Phase 2",
+                    "sponsor": "City of Hope",
+                }
+            ]
+        return []
+
+    async def _search_web(*args, **kwargs):
+        del args, kwargs
+        return []
+
+    monkeypatch.setattr(tasks, "storage_download_file", _download_file)
+    monkeypatch.setattr(tasks, "get_local_path_for_extraction", lambda file_path, contents: file_path)
+    monkeypatch.setattr(tasks, "extract_text", lambda _: "mock protocol text")
+    monkeypatch.setattr(tasks, "extract_trial_metadata_from_text", _extract_metadata)
+    monkeypatch.setattr(tasks, "search_studies", _search_studies)
+    monkeypatch.setattr(tasks, "search_web", _search_web)
+
+    await tasks.parse_trial_document({}, str(job.id))
+
+    updated_trial = (await db_session.execute(select(Trial).where(Trial.id == trial.id))).scalar_one()
+
+    assert updated_trial.nct_id == "NCT88889999"
+    assert updated_trial.ctg_match_note == "Auto-matched from CTG keyword search"
+    assert any("xyz-101" in query.lower() and "city" in query.lower() and "hope" in query.lower() for query in search_queries)
+
+
+async def test_ctg_title_miss_web_fallback_extracts_nct(db_session, monkeypatch):
+    user = await _create_user(db_session, email="pi7@example.com", role=UserRole.pi)
+    trial = Trial(
+        nickname="Web Resolver Trial",
+        status=TrialStatus.draft,
+        extraction_status=TrialExtractionStatus.processing,
+        created_by=user.id,
+    )
+    db_session.add(trial)
+    await db_session.flush()
+
+    doc = TrialDocument(
+        trial_id=trial.id,
+        version=1,
+        filename="protocol.pdf",
+        file_path="/tmp/protocol-web-fallback.pdf",
+        uploaded_by=user.id,
+    )
+    db_session.add(doc)
+    await db_session.flush()
+
+    job = BackgroundJob(
+        type="parse_trial_document",
+        status=JobStatus.pending,
+        payload={"trial_id": str(trial.id), "document_id": str(doc.id), "file_path": doc.file_path},
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    testing_session_factory = async_sessionmaker(db_session.bind, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(tasks, "AsyncSessionLocal", testing_session_factory)
+
+    async def _download_file(file_path):
+        del file_path
+        return b"pdf bytes", "protocol.pdf"
+
+    async def _extract_metadata(text):
+        del text
+        return TrialMetadataExtraction(
+            indication=Indication.aml,
+            sponsor="City of Hope",
+            phase="Phase 2",
+            trial_title="A Phase 2 Study of Cell Therapy in AML",
+            document_title="Protocol Header",
+            title_candidates=[
+                "A Phase 2 Study of Cell Therapy in AML",
+                "Randomized Study in AML",
+            ],
+        )
+
+    async def _search_studies(query):
+        del query
+        return []
+
+    web_queries: list[str] = []
+
+    async def _search_web(query, max_results=5):
+        del max_results
+        web_queries.append(query)
+        return [
+            {
+                "url": "https://clinicaltrials.gov/study/NCT99990000",
+                "title": "ClinicalTrials.gov - NCT99990000",
+                "snippet": "A Phase 2 Study of Cell Therapy in AML",
+            }
+        ]
+
+    async def _fetch_study(nct_id):
+        assert nct_id == "NCT99990000"
+        return {
+            "studies": [
+                {
+                    "protocolSection": {
+                        "identificationModule": {
+                            "nctId": "NCT99990000",
+                            "officialTitle": "A Phase 2 Study of Cell Therapy in AML",
+                        },
+                        "designModule": {"phases": ["Phase 2"]},
+                        "sponsorCollaboratorsModule": {"leadSponsor": {"name": "City of Hope"}},
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(tasks, "storage_download_file", _download_file)
+    monkeypatch.setattr(tasks, "get_local_path_for_extraction", lambda file_path, contents: file_path)
+    monkeypatch.setattr(tasks, "extract_text", lambda _: "mock protocol text")
+    monkeypatch.setattr(tasks, "extract_trial_metadata_from_text", _extract_metadata)
+    monkeypatch.setattr(tasks, "search_studies", _search_studies)
+    monkeypatch.setattr(tasks, "search_web", _search_web)
+    monkeypatch.setattr(tasks, "fetch_study", _fetch_study)
+
+    await tasks.parse_trial_document({}, str(job.id))
+
+    updated_trial = (await db_session.execute(select(Trial).where(Trial.id == trial.id))).scalar_one()
+
+    assert updated_trial.nct_id == "NCT99990000"
+    assert updated_trial.ctg_match_note == "Auto-matched from CTG web fallback"
+    assert any(query.startswith("site:clinicaltrials.gov ") for query in web_queries)

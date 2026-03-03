@@ -51,6 +51,10 @@ async def test_generate_awareness_card_with_full_trial_metadata(monkeypatch):
     assert card.fields["nct_id"] == "NCT12345678"
     assert card.fields["why_it_matters"] == "Offers novel mechanism in relapsed disease."
     assert card.fields["when_to_think"] == "Consider after standard options are exhausted."
+    assert "Trial title: Phase 2 Study of XYZ in AML" in card.text_card
+    assert "Phase: Phase 2" in card.text_card
+    assert "Sponsor: Trial Sponsor" in card.text_card
+    assert "NCT: NCT12345678" in card.text_card
     assert card.text_card
 
 
@@ -78,6 +82,21 @@ async def test_generate_awareness_card_uses_placeholders_for_missing_metadata(mo
     assert card.fields["nct_id"] == "TBD"
     assert card.fields["why_it_matters"] == "TBD"
     assert card.fields["when_to_think"] == "TBD"
+    assert "Trial details: TBD" in card.text_card
+
+
+async def test_generate_awareness_card_derives_intervention_class_from_title(monkeypatch):
+    trial = _trial(trial_title="A Phase 2 Study of CAR-T Therapy in AML")
+
+    async def _mock_chat_completion(*args, **kwargs):
+        del args, kwargs
+        return '{"why_it_matters":"Potentially novel mechanism.","when_to_think":"Consider per protocol timing."}'
+
+    monkeypatch.setattr(awareness_card, "chat_completion", _mock_chat_completion)
+
+    card = await awareness_card.build_awareness_card(trial, AwarenessCardGenerateRequest())
+
+    assert card.fields["intervention_class"] == "CAR-T cell therapy"
 
 
 async def test_generate_awareness_card_enforces_visual_line_length():

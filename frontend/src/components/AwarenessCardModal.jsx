@@ -6,6 +6,49 @@ function toNullable(value) {
   return trimmed ? trimmed : null
 }
 
+function inferInterventionClassFromTitle(trial) {
+  const source = `${trial?.trial_title || ''} ${trial?.document_title || ''}`.toLowerCase()
+  const sourcePadded = ` ${source} `
+  if (!source.trim()) return ''
+  if (source.includes('car-t') || source.includes('cart') || source.includes('chimeric antigen receptor')) {
+    return 'CAR-T cell therapy'
+  }
+  if (source.includes('bispecific') || source.includes('bi-specific') || source.includes('bsab')) {
+    return 'Bispecific antibody'
+  }
+  if (source.includes('antibody-drug conjugate') || source.includes('antibody drug conjugate') || sourcePadded.includes(' adc ')) {
+    return 'Antibody-drug conjugate'
+  }
+  if (source.includes('t-cell engager') || source.includes('t cell engager')) {
+    return 'T-cell engager'
+  }
+  if (source.includes('checkpoint inhibitor') || source.includes('pd-1') || source.includes('pd-l1') || source.includes('ctla-4')) {
+    return 'Checkpoint inhibitor'
+  }
+  if (source.includes('cell therapy')) {
+    return 'Cell therapy'
+  }
+  return ''
+}
+
+function extractReferralContactFromNotes(trial) {
+  if (typeof trial?.referral_contact === 'string' && trial.referral_contact.trim()) {
+    return trial.referral_contact.trim()
+  }
+
+  const notes = [trial?.notes, trial?.trial_notes, trial?.study_notes]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join('\n')
+  if (!notes) return ''
+
+  const contactLine = notes.match(/(?:referral contact|contact)\s*[:\-]\s*([^\n]+)/i)
+  if (contactLine?.[1]) {
+    return contactLine[1].trim()
+  }
+  const emailMatch = notes.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
+  return emailMatch?.[0] || ''
+}
+
 export default function AwarenessCardModal({ open, onClose, trialId, trial }) {
   const [form, setForm] = useState({
     disease_setting: '',
@@ -18,47 +61,62 @@ export default function AwarenessCardModal({ open, onClose, trialId, trial }) {
   const [error, setError] = useState('')
   const [card, setCard] = useState(null)
   const [copied, setCopied] = useState(false)
+  const [hasGeneratedInSession, setHasGeneratedInSession] = useState(false)
+  const [autoGenerateForm, setAutoGenerateForm] = useState(null)
 
-  useEffect(() => {
-    if (!open) return
-    setForm({
-      disease_setting: trial?.indication || '',
-      intervention_class: '',
-      why_it_matters: '',
-      when_to_think: '',
-      referral_contact: '',
-    })
-    setBusy(false)
-    setError('')
-    setCard(null)
-    setCopied(false)
-  }, [open, trial?.indication])
+  const buildPayload = (formValues) => ({
+    disease_setting: toNullable(formValues.disease_setting),
+    intervention_class: toNullable(formValues.intervention_class),
+    why_it_matters: toNullable(formValues.why_it_matters),
+    when_to_think: toNullable(formValues.when_to_think),
+    referral_contact: toNullable(formValues.referral_contact),
+  })
 
-  if (!open) return null
-
-  const setField = (name, value) => {
-    setForm((prev) => ({ ...prev, [name]: value }))
-  }
-
-  const generateCard = async () => {
+  const generateCard = async (formValues = form) => {
     setBusy(true)
     setError('')
     setCopied(false)
     try {
-      const payload = {
-        disease_setting: toNullable(form.disease_setting),
-        intervention_class: toNullable(form.intervention_class),
-        why_it_matters: toNullable(form.why_it_matters),
-        when_to_think: toNullable(form.when_to_think),
-        referral_contact: toNullable(form.referral_contact),
-      }
-      const res = await api.post(`/trials/${trialId}/awareness/generate`, payload)
+      const res = await api.post(`/trials/${trialId}/awareness/generate`, buildPayload(formValues))
       setCard(res.data)
+      setHasGeneratedInSession(true)
     } catch (err) {
       setError(err.response?.data?.detail || 'Could not generate awareness card.')
     } finally {
       setBusy(false)
     }
+  }
+
+  useEffect(() => {
+    if (!open) return
+    const initialForm = {
+      disease_setting: trial?.indication || '',
+      intervention_class: inferInterventionClassFromTitle(trial),
+      why_it_matters: '',
+      when_to_think: '',
+      referral_contact: extractReferralContactFromNotes(trial),
+    }
+    setHasGeneratedInSession(false)
+    setAutoGenerateForm(initialForm)
+    setForm({
+      ...initialForm,
+    })
+    setBusy(false)
+    setError('')
+    setCard(null)
+    setCopied(false)
+  }, [open, trialId])
+
+  useEffect(() => {
+    if (!open || hasGeneratedInSession || !autoGenerateForm) return
+    generateCard(autoGenerateForm)
+    setAutoGenerateForm(null)
+  }, [open, hasGeneratedInSession, autoGenerateForm])
+
+  if (!open) return null
+
+  const setField = (name, value) => {
+    setForm((prev) => ({ ...prev, [name]: value }))
   }
 
   const copyText = async () => {
@@ -136,7 +194,7 @@ export default function AwarenessCardModal({ open, onClose, trialId, trial }) {
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <button
             className="rounded-lg bg-ink px-4 py-2 text-sm text-white disabled:opacity-50"
-            onClick={generateCard}
+            onClick={() => generateCard(form)}
             disabled={busy}
           >
             {busy ? 'Generating...' : 'Generate'}

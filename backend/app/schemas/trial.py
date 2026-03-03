@@ -45,6 +45,10 @@ class TrialRead(BaseModel):
     id: UUID
     nct_id: str | None
     ctg_url: str | None
+    ctg_candidate_nct_id: str | None
+    ctg_candidate_url: str | None
+    ctg_candidate_title: str | None
+    ctg_candidate_source: str | None
     trial_title: str | None
     document_title: str | None
     ctg_match_confidence: float | None

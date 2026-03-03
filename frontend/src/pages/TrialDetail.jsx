@@ -57,6 +57,8 @@ export default function TrialDetail({ onLogout }) {
   const [expandedAmendments, setExpandedAmendments] = useState({})
   const [trialBusy, setTrialBusy] = useState(false)
   const [trialError, setTrialError] = useState('')
+  const [candidateBusy, setCandidateBusy] = useState(false)
+  const [candidateError, setCandidateError] = useState('')
   const [metadataForm, setMetadataForm] = useState({
     nickname: '',
     trial_title: '',
@@ -261,6 +263,20 @@ export default function TrialDetail({ onLogout }) {
       setMetadataError(err.response?.data?.detail || 'Could not update trial metadata.')
     } finally {
       setMetadataBusy(false)
+    }
+  }
+
+  const acceptCtgCandidate = async () => {
+    if (!canEditMetadata) return
+    setCandidateBusy(true)
+    setCandidateError('')
+    try {
+      await api.post(`/trials/${id}/ctg/accept-candidate`)
+      await loadTrialData()
+    } catch (err) {
+      setCandidateError(err.response?.data?.detail || 'Could not accept CTG candidate.')
+    } finally {
+      setCandidateBusy(false)
     }
   }
 
@@ -530,6 +546,46 @@ export default function TrialDetail({ onLogout }) {
                 <span className="font-medium">CTG match note:</span> {trial.ctg_match_note || 'N/A'}
               </div>
             </div>
+            {!trial.nct_id && (trial.ctg_candidate_nct_id || trial.ctg_candidate_title || trial.ctg_candidate_url) && (
+              <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                <p className="font-semibold">CTG candidate requires manual review</p>
+                <p className="mt-1">
+                  <span className="font-medium">NCT:</span> {trial.ctg_candidate_nct_id || 'N/A'}
+                </p>
+                <p className="mt-1">
+                  <span className="font-medium">Title:</span> {trial.ctg_candidate_title || 'N/A'}
+                </p>
+                <p className="mt-1">
+                  <span className="font-medium">Source:</span> {trial.ctg_candidate_source || 'N/A'}
+                </p>
+                <p className="mt-1">
+                  <span className="font-medium">Confidence:</span>{' '}
+                  {typeof trial.ctg_match_confidence === 'number' ? trial.ctg_match_confidence.toFixed(2) : 'N/A'}
+                </p>
+                {trial.ctg_candidate_url && (
+                  <a
+                    className="mt-2 inline-flex text-xs text-sky-700 hover:underline"
+                    href={trial.ctg_candidate_url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open candidate on ClinicalTrials.gov
+                  </a>
+                )}
+                {canEditMetadata && (
+                  <div className="mt-3">
+                    <button
+                      className="rounded-lg bg-ink px-3 py-2 text-sm text-white disabled:opacity-50"
+                      onClick={acceptCtgCandidate}
+                      disabled={candidateBusy}
+                    >
+                      {candidateBusy ? 'Accepting...' : 'Accept Candidate'}
+                    </button>
+                  </div>
+                )}
+                {candidateError && <p className="mt-2 text-sm text-rose-700">{candidateError}</p>}
+              </div>
+            )}
             <div className="mt-4 grid gap-3 md:grid-cols-2">
               <Card label="Status" value={trial.status} />
               <Card
@@ -878,6 +934,8 @@ export default function TrialDetail({ onLogout }) {
     id,
     trialBusy,
     trialError,
+    candidateBusy,
+    candidateError,
     documentsByVersion,
     canEditMetadata,
     metadataForm,

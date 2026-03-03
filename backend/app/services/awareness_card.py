@@ -47,6 +47,41 @@ def _build_subtitle(indication: str, phase: str, nct_id: str) -> str:
     return _truncate_line(f"{indication} | {phase} | {nct_id}")
 
 
+def _infer_intervention_class(*, title: str | None, document_title: str | None) -> str | None:
+    source = f"{title or ''} {document_title or ''}".lower()
+    if not source.strip():
+        return None
+
+    if "car-t" in source or "cart" in source or "chimeric antigen receptor" in source:
+        return "CAR-T cell therapy"
+    if "bispecific" in source or "bi-specific" in source or "bsab" in source:
+        return "Bispecific antibody"
+    if "antibody-drug conjugate" in source or "antibody drug conjugate" in source or " adc " in f" {source} ":
+        return "Antibody-drug conjugate"
+    if "t-cell engager" in source or "t cell engager" in source:
+        return "T-cell engager"
+    if "checkpoint inhibitor" in source or "pd-1" in source or "pd-l1" in source or "ctla-4" in source:
+        return "Checkpoint inhibitor"
+    if "cell therapy" in source:
+        return "Cell therapy"
+    return None
+
+
+def _build_trial_detail_line(*, title: str | None, phase: str | None, sponsor: str | None, nct_id: str | None) -> str:
+    segments: list[str] = []
+    if title and title.strip():
+        segments.append(f"Trial title: {title.strip()}")
+    if phase and phase.strip():
+        segments.append(f"Phase: {phase.strip()}")
+    if sponsor and sponsor.strip():
+        segments.append(f"Sponsor: {sponsor.strip()}")
+    if nct_id and nct_id.strip():
+        segments.append(f"NCT: {nct_id.strip()}")
+    if not segments:
+        return "Trial details: TBD"
+    return _truncate_line(" | ".join(segments))
+
+
 def _parse_llm_json(response_text: str | None) -> dict[str, str]:
     if not response_text:
         return {}
@@ -91,6 +126,7 @@ async def build_awareness_card(trial: Trial, overrides: AwarenessCardGenerateReq
     phase = _string_or_placeholder(trial.phase)
     sponsor = _string_or_placeholder(trial.sponsor)
     nct_id = _string_or_placeholder(trial.nct_id)
+    intervention_class = _infer_intervention_class(title=trial.trial_title, document_title=trial.document_title)
 
     fields = {
         "title": _truncate_line(title),
@@ -99,7 +135,7 @@ async def build_awareness_card(trial: Trial, overrides: AwarenessCardGenerateReq
         "sponsor": _truncate_line(sponsor),
         "nct_id": _truncate_line(nct_id),
         "disease_setting": _truncate_line(overrides.disease_setting or indication),
-        "intervention_class": _truncate_line(overrides.intervention_class or PLACEHOLDER),
+        "intervention_class": _truncate_line(overrides.intervention_class or intervention_class or PLACEHOLDER),
         "why_it_matters": _truncate_line(overrides.why_it_matters or ""),
         "when_to_think": _truncate_line(overrides.when_to_think or ""),
         "referral_contact": _truncate_line(overrides.referral_contact or PLACEHOLDER),
@@ -143,5 +179,17 @@ async def build_awareness_card(trial: Trial, overrides: AwarenessCardGenerateReq
         lines=visual_lines,
     )
 
-    text_card = "\n".join([visual.title, visual.subtitle, *visual.lines])
+    text_card = "\n".join(
+        [
+            visual.title,
+            visual.subtitle,
+            _build_trial_detail_line(
+                title=trial.trial_title or trial.document_title,
+                phase=trial.phase,
+                sponsor=trial.sponsor,
+                nct_id=trial.nct_id,
+            ),
+            *visual.lines,
+        ]
+    )
     return AwarenessCardResponse(text_card=text_card, visual=visual, fields=fields)

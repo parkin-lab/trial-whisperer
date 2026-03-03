@@ -264,6 +264,40 @@ async def update_trial(
 
     if "nct_id" in updates and "ctg_url" not in updates:
         trial.ctg_url = _build_ctg_url(trial.nct_id)
+    if "nct_id" in updates and updates["nct_id"]:
+        trial.ctg_candidate_nct_id = None
+        trial.ctg_candidate_url = None
+        trial.ctg_candidate_title = None
+        trial.ctg_candidate_source = None
+
+    await db.commit()
+    await db.refresh(trial)
+    return TrialRead.model_validate(trial)
+
+
+@router.post("/{trial_id}/ctg/accept-candidate", response_model=TrialRead)
+async def accept_ctg_candidate(
+    trial_id: UUID,
+    _: Annotated[User, Depends(require_role(UserRole.owner, UserRole.pi, UserRole.coordinator))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> TrialRead:
+    trial = await _get_trial_or_404(db, trial_id)
+
+    if not trial.ctg_candidate_nct_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No CTG candidate available for acceptance",
+        )
+
+    trial.nct_id = trial.ctg_candidate_nct_id
+    trial.ctg_url = trial.ctg_candidate_url or _build_ctg_url(trial.ctg_candidate_nct_id)
+    if trial.ctg_candidate_title:
+        trial.trial_title = trial.ctg_candidate_title
+    trial.ctg_candidate_nct_id = None
+    trial.ctg_candidate_url = None
+    trial.ctg_candidate_title = None
+    trial.ctg_candidate_source = None
+    trial.ctg_match_note = "Candidate manually accepted"
 
     await db.commit()
     await db.refresh(trial)

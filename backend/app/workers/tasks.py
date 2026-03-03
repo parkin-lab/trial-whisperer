@@ -5,12 +5,14 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from arq.connections import RedisSettings
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.config import get_settings
 from app.database import AsyncSessionLocal
-from app.models.enums import JobStatus, TrialExtractionStatus
-from app.models.trial import BackgroundJob, Trial
+from app.engine.schema import validate_expression
+from app.models.enums import ConfidenceLevel, JobStatus, TrialExtractionStatus
+from app.models.trial import BackgroundJob, Trial, TrialCriteria, TrialDocument
+from app.services.criteria_parser import parse_criteria_from_text
 from app.services.ctg import fetch_study, first_study_result, search_studies, search_web
 from app.services.ctg_resolver import (
     build_keyword_queries,
@@ -36,6 +38,7 @@ CTG_MATCH_NOTES_BY_SOURCE = {
     CTG_SOURCE_KEYWORD: "Auto-matched from CTG keyword search",
     CTG_SOURCE_WEB: "Auto-matched from CTG web fallback",
 }
+ENGINE_RULE_VERSION = "1.0.0"
 
 
 def _redis_settings_from_dsn(dsn: str) -> RedisSettings:
@@ -73,6 +76,78 @@ def _ordered_unique_titles(values: list[str | None]) -> list[str]:
     return deduped
 
 
+def _clear_ctg_candidate_fields(trial: Trial) -> None:
+    trial.ctg_candidate_nct_id = None
+    trial.ctg_candidate_url = None
+    trial.ctg_candidate_title = None
+    trial.ctg_candidate_source = None
+
+
+def _candidate_title(candidate: dict) -> str | None:
+    title_value = candidate.get("officialTitle") or candidate.get("briefTitle")
+    if not title_value:
+        return None
+    return str(title_value).strip()[:500] or None
+
+
+async def _upsert_parsed_criteria(
+    *,
+    session,
+    trial_id: UUID,
+    document_version: int,
+    text: str,
+) -> int:
+    parsed = await parse_criteria_from_text(text)
+    if not parsed:
+        logger.info(
+            "Criteria parser returned no rows",
+            extra={"trial_id": str(trial_id), "document_version": document_version},
+        )
+        return 0
+
+    await session.execute(
+        delete(TrialCriteria).where(
+            TrialCriteria.trial_id == trial_id,
+            TrialCriteria.document_version == document_version,
+        )
+    )
+
+    inserted_count = 0
+    for item in parsed:
+        criterion_text = (item.text or "").strip()
+        if not criterion_text:
+            continue
+
+        confidence_value = item.confidence
+        expression_value = item.expression
+        manual_review_required = item.manual_review_required
+
+        try:
+            validate_expression(expression_value)
+            expression_payload = expression_value
+        except Exception:
+            expression_payload = {"op": "is_true", "field": "manual_review_placeholder"}
+            confidence_value = ConfidenceLevel.needs_review
+            manual_review_required = True
+
+        row = TrialCriteria(
+            trial_id=trial_id,
+            document_version=document_version,
+            type=item.type,
+            text=criterion_text,
+            expression=expression_payload,
+            confidence=confidence_value,
+            manual_review_required=manual_review_required,
+            approved_by=None,
+            approved_at=None,
+            rule_version=ENGINE_RULE_VERSION,
+        )
+        session.add(row)
+        inserted_count += 1
+
+    return inserted_count
+
+
 async def parse_trial_document(ctx: dict, job_id: str) -> None:
     del ctx
     try:
@@ -92,6 +167,7 @@ async def parse_trial_document(ctx: dict, job_id: str) -> None:
             payload = job.payload or {}
             trial_id_raw = payload.get("trial_id")
             file_path = payload.get("file_path")
+            document_id_raw = payload.get("document_id")
             if not trial_id_raw or not file_path:
                 raise ValueError("Background job payload missing trial_id or file_path")
 
@@ -126,6 +202,55 @@ async def parse_trial_document(ctx: dict, job_id: str) -> None:
                 trial.sponsor = metadata.sponsor
             if not trial.phase and metadata.phase:
                 trial.phase = metadata.phase
+
+            document_version: int | None = None
+            if document_id_raw:
+                try:
+                    document_id = UUID(document_id_raw)
+                except ValueError:
+                    logger.warning(
+                        "Invalid trial document id in parse job payload",
+                        extra={"job_id": str(job.id), "document_id": document_id_raw},
+                    )
+                else:
+                    document_result = await session.execute(
+                        select(TrialDocument).where(
+                            TrialDocument.id == document_id,
+                            TrialDocument.trial_id == trial.id,
+                        )
+                    )
+                    trial_document = document_result.scalar_one_or_none()
+                    if trial_document is not None:
+                        document_version = trial_document.version
+
+            if document_version is None:
+                latest_doc_result = await session.execute(
+                    select(TrialDocument)
+                    .where(TrialDocument.trial_id == trial.id)
+                    .order_by(TrialDocument.version.desc())
+                )
+                latest_doc = latest_doc_result.scalars().first()
+                if latest_doc is not None:
+                    document_version = latest_doc.version
+
+            if document_version is None:
+                logger.warning(
+                    "Could not determine document version for criteria upsert",
+                    extra={"trial_id": str(trial.id), "job_id": str(job.id)},
+                )
+            else:
+                try:
+                    await _upsert_parsed_criteria(
+                        session=session,
+                        trial_id=trial.id,
+                        document_version=document_version,
+                        text=text,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Criteria parser failed during ingestion",
+                        extra={"trial_id": str(trial.id), "document_version": document_version},
+                    )
 
             if not trial.nct_id:
                 title_candidates = _ordered_unique_titles(
@@ -275,19 +400,34 @@ async def parse_trial_document(ctx: dict, job_id: str) -> None:
                         if best_confidence >= CTG_AUTOFILL_CONFIDENCE and best_candidate.get("nctId"):
                             trial.nct_id = best_candidate["nctId"]
                             trial.ctg_url = f"https://clinicaltrials.gov/study/{trial.nct_id}"
+                            _clear_ctg_candidate_fields(trial)
                             trial.ctg_match_note = CTG_MATCH_NOTES_BY_SOURCE.get(
                                 best_source,
                                 CTG_MATCH_NOTES_BY_SOURCE[CTG_SOURCE_TITLE],
                             )
                         else:
+                            trial.nct_id = None
+                            trial.ctg_url = None
+                            trial.ctg_candidate_nct_id = best_candidate.get("nctId")
+                            trial.ctg_candidate_url = (
+                                f"https://clinicaltrials.gov/study/{best_candidate['nctId']}"
+                                if best_candidate.get("nctId")
+                                else None
+                            )
+                            trial.ctg_candidate_title = _candidate_title(best_candidate)
+                            trial.ctg_candidate_source = best_source
                             trial.ctg_match_note = "Candidate found; manual review recommended"
                     elif total_title_searches and search_failures == total_title_searches:
+                        _clear_ctg_candidate_fields(trial)
                         trial.ctg_match_note = "CTG title search failed"
                     else:
                         trial.ctg_match_confidence = 0.0
+                        _clear_ctg_candidate_fields(trial)
                         trial.ctg_match_note = "No CTG match found from resolver ladder"
+            else:
+                _clear_ctg_candidate_fields(trial)
 
-            has_ctg_link = bool(trial.nct_id or ((trial.ctg_match_confidence or 0.0) >= CTG_AUTOFILL_CONFIDENCE))
+            has_ctg_link = bool(trial.nct_id)
             has_core_fields = bool(trial.indication and trial.sponsor and trial.phase and has_ctg_link)
             trial.extraction_status = TrialExtractionStatus.ready if has_core_fields else TrialExtractionStatus.needs_review
             trial.extraction_completed_at = datetime.now(UTC)
