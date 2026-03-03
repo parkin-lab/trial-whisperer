@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import AwarenessCardModal from '../components/AwarenessCardModal'
 import Nav from '../components/Nav'
 import ProtocolQA from '../components/ProtocolQA'
 import UploadModal from '../components/UploadModal'
@@ -69,6 +70,7 @@ export default function TrialDetail({ onLogout }) {
   const [metadataBusy, setMetadataBusy] = useState(false)
   const [metadataError, setMetadataError] = useState('')
   const [metadataSaved, setMetadataSaved] = useState('')
+  const [awarenessOpen, setAwarenessOpen] = useState(false)
 
   if (!user) {
     return null
@@ -373,6 +375,17 @@ export default function TrialDetail({ onLogout }) {
     if (activeTab === 'Overview') {
       return (
         <div className="space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <h4 className="font-display text-lg">Awareness Card</h4>
+            <p className="mt-1 text-sm text-slate-600">Create a concise, shareable trial-level card.</p>
+            <button
+              className="mt-3 rounded-lg bg-ink px-4 py-2 text-sm text-white"
+              onClick={() => setAwarenessOpen(true)}
+            >
+              Generate Awareness Card
+            </button>
+          </div>
+
           {(canArchive || canDelete) && (
             <div className="rounded-xl border border-slate-200 bg-white p-4">
               <h4 className="font-display text-lg">Trial Actions</h4>
@@ -949,6 +962,13 @@ export default function TrialDetail({ onLogout }) {
           </div>
         </div>
       )}
+
+      <AwarenessCardModal
+        open={awarenessOpen}
+        onClose={() => setAwarenessOpen(false)}
+        trialId={id}
+        trial={trial}
+      />
     </div>
   )
 }

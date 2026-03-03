@@ -14,7 +14,7 @@ from app.middleware.logging import JsonLoggingMiddleware
 from app.models.enums import UserRole
 from app.models.user import DomainAllowlist, User
 from app.rate_limiter import RateLimitExceeded, _rate_limit_exceeded_handler, limiter
-from app.routers import admin, audit, auth, criteria, ctg, qa, screener, trials
+from app.routers import admin, audit, auth, awareness, criteria, ctg, qa, screener, trials
 from app.services.auth import extract_domain, hash_password
 
 settings = get_settings()
@@ -93,6 +93,7 @@ app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(audit.router)
 app.include_router(trials.router)
+app.include_router(awareness.router)
 app.include_router(criteria.router)
 app.include_router(ctg.router)
 app.include_router(screener.router)
