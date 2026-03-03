@@ -25,6 +25,14 @@ const extractionStatusClass = {
   needs_review: 'bg-amber-100 text-amber-800',
 }
 
+const reasonLabelMap = {
+  disease_match: 'Disease',
+  intervention_match: 'Intervention',
+  phase_match: 'Phase',
+  population_match: 'Population',
+  sponsor_match: 'Sponsor',
+}
+
 function truncateSummary(value, maxLength = 180) {
   if (!value) return ''
   if (value.length <= maxLength) return value
@@ -132,7 +140,7 @@ export default function TrialDetail({ onLogout }) {
   const loadCtgCandidates = async () => {
     try {
       const res = await api.get(`/trials/${id}/ctg/candidates`)
-      setCtgCandidates(Array.isArray(res.data) ? res.data.slice(0, 3) : [])
+      setCtgCandidates(Array.isArray(res.data) ? res.data.slice(0, 5) : [])
     } catch {
       setCtgCandidates([])
     }
@@ -342,7 +350,13 @@ export default function TrialDetail({ onLogout }) {
             title: candidate.title || null,
             url: candidate.url || null,
             source: candidate.source || null,
-            confidence: typeof candidate.confidence === 'number' ? candidate.confidence : null,
+            final_score: typeof candidate.final_score === 'number' ? candidate.final_score : null,
+            confidence:
+              typeof candidate.final_score === 'number'
+                ? candidate.final_score
+                : typeof candidate.confidence === 'number'
+                  ? candidate.confidence
+                  : null,
           }
         : {}
       await api.post(`/trials/${id}/ctg/accept-candidate`, payload)
@@ -475,6 +489,18 @@ export default function TrialDetail({ onLogout }) {
       loadAudit()
     }
   }, [activeTab, id, canAudit])
+
+  const suggestedManualCtgQuery = useMemo(() => {
+    if (!trial) return 'site:clinicaltrials.gov <disease> <intervention> <phase>'
+    const parts = [trial.trial_title, trial.indication, trial.phase, trial.sponsor]
+      .map((value) => (value ? String(value).trim() : ''))
+      .filter(Boolean)
+    const query = parts.join(' ')
+    if (query) {
+      return `site:clinicaltrials.gov ${query}`
+    }
+    return 'site:clinicaltrials.gov <disease> <intervention> <phase>'
+  }, [trial])
 
   const content = useMemo(() => {
     if (!trial) return <div className="text-sm">Loading...</div>
@@ -639,37 +665,50 @@ export default function TrialDetail({ onLogout }) {
             </div>
             {!trial.nct_id && ctgCandidates.length > 0 && (
               <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                <p className="font-semibold">CTG candidates require manual review</p>
-                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <p className="font-semibold">Top CTG candidates</p>
+                <div className="mt-3 grid gap-3 md:grid-cols-1">
                   {ctgCandidates.map((candidate) => (
                     <div key={`${candidate.nct_id}-${candidate.source || 'source'}`} className="rounded-lg border border-amber-300 bg-white p-3">
-                      <p>
-                        <span className="font-medium">NCT:</span> {candidate.nct_id}
-                      </p>
-                      <p className="mt-1">
-                        <span className="font-medium">Title:</span> {candidate.title || 'N/A'}
-                      </p>
-                      <p className="mt-1">
-                        <span className="font-medium">Source:</span> {candidate.source || 'N/A'}
-                      </p>
-                      <p className="mt-1">
-                        <span className="font-medium">Confidence:</span>{' '}
-                        {typeof candidate.confidence === 'number'
-                          ? candidate.confidence.toFixed(2)
-                          : typeof trial.ctg_match_confidence === 'number'
-                            ? trial.ctg_match_confidence.toFixed(2)
-                            : 'N/A'}
-                      </p>
-                      {candidate.url && (
-                        <a
-                          className="mt-2 inline-flex text-xs text-sky-700 hover:underline"
-                          href={candidate.url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          Open on ClinicalTrials.gov
-                        </a>
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="text-xs uppercase tracking-wide text-slate-500">{candidate.source || 'resolver'}</p>
+                          <p className="font-medium text-slate-900">{candidate.title || 'Untitled CTG Candidate'}</p>
+                          {candidate.url ? (
+                            <a className="mt-1 inline-flex text-xs text-sky-700 hover:underline" href={candidate.url} target="_blank" rel="noreferrer">
+                              {candidate.nct_id}
+                            </a>
+                          ) : (
+                            <p className="mt-1 text-xs text-slate-700">{candidate.nct_id}</p>
+                          )}
+                        </div>
+                        <div className="rounded-lg bg-slate-100 px-3 py-2 text-right">
+                          <p className="text-xs uppercase tracking-wide text-slate-500">Final Score</p>
+                          <p className="text-xl font-semibold text-slate-900">
+                            {typeof candidate.final_score === 'number'
+                              ? candidate.final_score.toFixed(2)
+                              : typeof candidate.confidence === 'number'
+                                ? candidate.confidence.toFixed(2)
+                                : 'N/A'}
+                          </p>
+                          <p className="text-[11px] text-slate-500">
+                            lex {typeof candidate.lexical_score === 'number' ? candidate.lexical_score.toFixed(2) : 'N/A'} | sem{' '}
+                            {typeof candidate.semantic_score === 'number' ? candidate.semantic_score.toFixed(2) : 'N/A'}
+                          </p>
+                        </div>
+                      </div>
+
+                      {Array.isArray(candidate.reason_codes) && candidate.reason_codes.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {candidate.reason_codes.map((code) => (
+                            <span key={`${candidate.nct_id}-${code}`} className="rounded-full bg-sky-100 px-2 py-1 text-[11px] font-medium text-sky-800">
+                              {reasonLabelMap[code] || code}
+                            </span>
+                          ))}
+                        </div>
                       )}
+
+                      {candidate.notes && <p className="mt-2 text-xs text-slate-700">{candidate.notes}</p>}
+
                       {canEditMetadata && (
                         <div className="mt-3">
                           <button
@@ -687,43 +726,15 @@ export default function TrialDetail({ onLogout }) {
                 {candidateError && <p className="mt-2 text-sm text-rose-700">{candidateError}</p>}
               </div>
             )}
-            {!trial.nct_id && ctgCandidates.length === 0 && (trial.ctg_candidate_nct_id || trial.ctg_candidate_title || trial.ctg_candidate_url) && (
+            {!trial.nct_id && ctgCandidates.length === 0 && (
               <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                <p className="font-semibold">CTG candidate requires manual review</p>
-                <p className="mt-1">
-                  <span className="font-medium">NCT:</span> {trial.ctg_candidate_nct_id || 'N/A'}
+                <p className="font-semibold">No CTG candidates found</p>
+                <p className="mt-1 text-amber-900/90">
+                  Try a manual search query in CTG or web search, then paste the selected NCT ID into metadata.
                 </p>
-                <p className="mt-1">
-                  <span className="font-medium">Title:</span> {trial.ctg_candidate_title || 'N/A'}
+                <p className="mt-2 text-xs">
+                  Suggested query: <span className="font-mono">{suggestedManualCtgQuery}</span>
                 </p>
-                <p className="mt-1">
-                  <span className="font-medium">Source:</span> {trial.ctg_candidate_source || 'N/A'}
-                </p>
-                <p className="mt-1">
-                  <span className="font-medium">Confidence:</span>{' '}
-                  {typeof trial.ctg_match_confidence === 'number' ? trial.ctg_match_confidence.toFixed(2) : 'N/A'}
-                </p>
-                {trial.ctg_candidate_url && (
-                  <a
-                    className="mt-2 inline-flex text-xs text-sky-700 hover:underline"
-                    href={trial.ctg_candidate_url}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Open candidate on ClinicalTrials.gov
-                  </a>
-                )}
-                {canEditMetadata && (
-                  <div className="mt-3">
-                    <button
-                      className="rounded-lg bg-ink px-3 py-2 text-sm text-white disabled:opacity-50"
-                      onClick={() => acceptCtgCandidate(null)}
-                      disabled={candidateBusy}
-                    >
-                      {candidateBusy ? 'Accepting...' : 'Accept Candidate'}
-                    </button>
-                  </div>
-                )}
                 {candidateError && <p className="mt-2 text-sm text-rose-700">{candidateError}</p>}
               </div>
             )}
@@ -1117,6 +1128,7 @@ export default function TrialDetail({ onLogout }) {
     metadataBusy,
     metadataError,
     metadataSaved,
+    suggestedManualCtgQuery,
   ])
 
   return (

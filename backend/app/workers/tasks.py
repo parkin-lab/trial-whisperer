@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from datetime import UTC, datetime
@@ -20,23 +21,36 @@ from app.services.ctg_resolver import (
     generate_title_variants,
     score_candidate,
 )
+from app.services.ctg_semantic import build_protocol_summary_context, count_core_reason_codes, score_candidate_semantic
 from app.services.documents import extract_text
 from app.services.storage import download_file as storage_download_file, get_local_path_for_extraction
 from app.services.trial_metadata import extract_trial_metadata_from_text
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
-CTG_AUTOFILL_CONFIDENCE = 0.78
+CTG_AUTOFILL_FINAL_SCORE = 0.85
+CTG_AUTO_ACCEPT_MIN_CORE_SIGNALS = 2
+CTG_LEXICAL_WEIGHT = 0.10
+CTG_SEMANTIC_WEIGHT = 0.90
 CTG_TITLE_CANDIDATE_LIMIT = 3
 CTG_QUERY_RESULT_LIMIT = 3
 CTG_WEB_RESULT_LIMIT = 5
+CTG_CANDIDATE_POOL_LIMIT = 5
 CTG_SOURCE_TITLE = "title"
+CTG_SOURCE_VARIANT = "variant"
 CTG_SOURCE_KEYWORD = "keyword"
 CTG_SOURCE_WEB = "web"
 CTG_MATCH_NOTES_BY_SOURCE = {
     CTG_SOURCE_TITLE: "Auto-matched from CTG title search",
+    CTG_SOURCE_VARIANT: "Auto-matched from CTG title variant search",
     CTG_SOURCE_KEYWORD: "Auto-matched from CTG keyword search",
     CTG_SOURCE_WEB: "Auto-matched from CTG web fallback",
+}
+CTG_SOURCE_PRIORITY = {
+    CTG_SOURCE_TITLE: 4,
+    CTG_SOURCE_VARIANT: 3,
+    CTG_SOURCE_KEYWORD: 2,
+    CTG_SOURCE_WEB: 1,
 }
 ENGINE_RULE_VERSION = "1.0.0"
 
@@ -84,30 +98,76 @@ def _clear_ctg_candidate_fields(trial: Trial) -> None:
 
 
 def _candidate_title(candidate: dict) -> str | None:
-    title_value = candidate.get("officialTitle") or candidate.get("briefTitle")
+    title_value = candidate.get("title") or candidate.get("officialTitle") or candidate.get("briefTitle")
     if not title_value:
         return None
     return str(title_value).strip()[:500] or None
 
 
+def _clamp_score(value: float | int | None) -> float:
+    if value is None:
+        return 0.0
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, score))
+
+
+def _blend_score(lexical_score: float, semantic_score: float) -> float:
+    blended = (CTG_LEXICAL_WEIGHT * _clamp_score(lexical_score)) + (CTG_SEMANTIC_WEIGHT * _clamp_score(semantic_score))
+    return _clamp_score(blended)
+
+
+def _candidate_sort_tuple(item: dict) -> tuple[float, float, float]:
+    return (
+        _clamp_score(item.get("final_score")),
+        _clamp_score(item.get("semantic_score")),
+        _clamp_score(item.get("lexical_score")),
+    )
+
+
 def _build_candidate_pool(candidate_by_nct: dict[str, dict]) -> list[dict]:
-    ranked = sorted(candidate_by_nct.values(), key=lambda item: item.get("confidence", 0.0), reverse=True)[:3]
+    ranked = sorted(candidate_by_nct.values(), key=_candidate_sort_tuple, reverse=True)[:CTG_CANDIDATE_POOL_LIMIT]
     pool: list[dict] = []
     for item in ranked:
-        candidate = item.get("candidate") or {}
-        nct_id = str(candidate.get("nctId") or "").strip()
+        nct_id = str(item.get("nct_id") or "").strip()
         if not nct_id:
             continue
         pool.append(
             {
                 "nct_id": nct_id,
-                "title": _candidate_title(candidate),
-                "url": f"https://clinicaltrials.gov/study/{nct_id}",
-                "confidence": max(0.0, float(item.get("confidence", 0.0))),
+                "title": _candidate_title(item),
+                "url": item.get("url") or f"https://clinicaltrials.gov/study/{nct_id}",
                 "source": item.get("source"),
+                "lexical_score": _clamp_score(item.get("lexical_score")),
+                "semantic_score": _clamp_score(item.get("semantic_score")),
+                "final_score": _clamp_score(item.get("final_score")),
+                "reason_codes": [str(code) for code in (item.get("reason_codes") or []) if str(code).strip()],
+                "notes": str(item.get("notes") or "").strip()[:200] or None,
             }
         )
     return pool
+
+
+def _manual_review_note(best_candidate: dict | None) -> str:
+    if not best_candidate:
+        return "No CTG match found from resolver ladder"
+
+    nct_id = str(best_candidate.get("nct_id") or "").strip()
+    final_score = _clamp_score(best_candidate.get("final_score"))
+    core_signal_count = count_core_reason_codes(best_candidate.get("reason_codes") or [])
+
+    if final_score < CTG_AUTOFILL_FINAL_SCORE:
+        return (
+            f"Top CTG candidate {nct_id or 'N/A'} scored {final_score:.2f}; "
+            f"below auto-accept threshold {CTG_AUTOFILL_FINAL_SCORE:.2f}. Manual review required."
+        )
+
+    return (
+        f"Top CTG candidate {nct_id or 'N/A'} scored {final_score:.2f}, but only {core_signal_count} "
+        "core signal(s) among disease/intervention/phase. Manual review required."
+    )
 
 
 async def _upsert_parsed_criteria(
@@ -300,6 +360,9 @@ async def parse_trial_document(ctx: dict, job_id: str) -> None:
                     search_failures = 0
                     total_title_searches = 0
                     searched_title_queries: set[str] = set()
+                    indication_value = None
+                    if trial.indication is not None:
+                        indication_value = getattr(trial.indication, "value", str(trial.indication))
 
                     def _remember_candidate(
                         ctg_candidate: dict,
@@ -310,7 +373,7 @@ async def parse_trial_document(ctx: dict, job_id: str) -> None:
                         if not nct_id:
                             return
 
-                        confidence = score_candidate(
+                        lexical_score = score_candidate(
                             trial_title=reference_title,
                             trial_phase=trial.phase,
                             trial_sponsor=trial.sponsor,
@@ -318,19 +381,53 @@ async def parse_trial_document(ctx: dict, job_id: str) -> None:
                             candidate_phase=ctg_candidate.get("phase"),
                             candidate_sponsor=ctg_candidate.get("sponsor"),
                         )
-
+                        candidate_title = _candidate_title(ctg_candidate)
+                        candidate_record = {
+                            "nct_id": nct_id,
+                            "title": candidate_title,
+                            "phase": (ctg_candidate.get("phase") or None),
+                            "sponsor": (ctg_candidate.get("sponsor") or None),
+                            "source": source,
+                            "url": f"https://clinicaltrials.gov/study/{nct_id}",
+                            "lexical_score": _clamp_score(lexical_score),
+                            "semantic_score": 0.0,
+                            "final_score": _clamp_score(lexical_score),
+                            "reason_codes": [],
+                            "notes": "",
+                        }
                         existing = candidate_by_nct.get(nct_id)
-                        if existing is None or confidence > existing["confidence"]:
-                            ctg_candidate["nctId"] = nct_id
-                            candidate_by_nct[nct_id] = {
-                                "candidate": ctg_candidate,
-                                "confidence": confidence,
-                                "source": source,
-                            }
+                        if existing is None:
+                            candidate_by_nct[nct_id] = candidate_record
+                            return
+
+                        if not existing.get("title") and candidate_record.get("title"):
+                            existing["title"] = candidate_record["title"]
+                        if not existing.get("phase") and candidate_record.get("phase"):
+                            existing["phase"] = candidate_record["phase"]
+                        if not existing.get("sponsor") and candidate_record.get("sponsor"):
+                            existing["sponsor"] = candidate_record["sponsor"]
+
+                        existing_lexical = _clamp_score(existing.get("lexical_score"))
+                        candidate_lexical = _clamp_score(candidate_record.get("lexical_score"))
+                        is_better = candidate_lexical > existing_lexical
+                        if abs(candidate_lexical - existing_lexical) < 1e-6:
+                            is_better = CTG_SOURCE_PRIORITY.get(source, 0) > CTG_SOURCE_PRIORITY.get(
+                                str(existing.get("source") or ""),
+                                0,
+                            )
+
+                        if is_better:
+                            existing["title"] = candidate_record["title"] or existing.get("title")
+                            existing["phase"] = candidate_record["phase"] or existing.get("phase")
+                            existing["sponsor"] = candidate_record["sponsor"] or existing.get("sponsor")
+                            existing["source"] = source
+                            existing["lexical_score"] = candidate_lexical
+                            existing["final_score"] = candidate_lexical
+                            existing["url"] = candidate_record["url"]
 
                     for candidate_title in title_candidates:
                         title_queries = [candidate_title, *generate_title_variants(candidate_title)]
-                        for query in title_queries:
+                        for index, query in enumerate(title_queries):
                             query_key = _normalize_text(query)
                             if not query_key or query_key in searched_title_queries:
                                 continue
@@ -347,12 +444,9 @@ async def parse_trial_document(ctx: dict, job_id: str) -> None:
                                 )
                                 continue
 
+                            source = CTG_SOURCE_TITLE if index == 0 else CTG_SOURCE_VARIANT
                             for ctg_candidate in ctg_candidates[:CTG_QUERY_RESULT_LIMIT]:
-                                _remember_candidate(ctg_candidate, CTG_SOURCE_TITLE, candidate_title)
-
-                    indication_value = None
-                    if trial.indication is not None:
-                        indication_value = getattr(trial.indication, "value", str(trial.indication))
+                                _remember_candidate(ctg_candidate, source, candidate_title)
 
                     keyword_queries = build_keyword_queries(
                         indication=indication_value,
@@ -426,35 +520,90 @@ async def parse_trial_document(ctx: dict, job_id: str) -> None:
                             )
 
                     if candidate_by_nct:
-                        trial.ctg_candidate_pool = _build_candidate_pool(candidate_by_nct)
-                        best_match = max(candidate_by_nct.values(), key=lambda item: item["confidence"])
-                        best_candidate = best_match["candidate"]
-                        best_confidence = max(0.0, best_match["confidence"])
-                        best_source = best_match["source"]
+                        protocol_context = build_protocol_summary_context(
+                            trial_title=trial.trial_title or title_candidates[0],
+                            document_title=trial.document_title or metadata.document_title,
+                            indication=indication_value,
+                            phase=trial.phase,
+                            sponsor=trial.sponsor,
+                            title_candidates=title_candidates,
+                            protocol_text=text,
+                        )
 
-                        trial.ctg_match_confidence = max(0.0, best_confidence)
-                        if best_confidence >= CTG_AUTOFILL_CONFIDENCE and best_candidate.get("nctId"):
-                            trial.nct_id = best_candidate["nctId"]
-                            trial.ctg_url = f"https://clinicaltrials.gov/study/{trial.nct_id}"
+                        semantic_results = await asyncio.gather(
+                            *[
+                                score_candidate_semantic(
+                                    protocol_context=protocol_context,
+                                    trial_title=trial.trial_title or title_candidates[0],
+                                    indication=indication_value,
+                                    trial_phase=trial.phase,
+                                    trial_sponsor=trial.sponsor,
+                                    candidate=candidate_entry,
+                                    lexical_score=_clamp_score(candidate_entry.get("lexical_score")),
+                                )
+                                for candidate_entry in candidate_by_nct.values()
+                            ],
+                            return_exceptions=True,
+                        )
+
+                        for candidate_entry, semantic_result in zip(candidate_by_nct.values(), semantic_results):
+                            if isinstance(semantic_result, Exception):
+                                logger.exception(
+                                    "CTG semantic scoring failed",
+                                    extra={"trial_id": str(trial.id), "nct_id": candidate_entry.get("nct_id")},
+                                )
+                                semantic_score = _clamp_score(candidate_entry.get("lexical_score"))
+                                reason_codes: list[str] = []
+                                notes = "Semantic scorer failed; using lexical fallback"
+                            else:
+                                semantic_score = _clamp_score(semantic_result.get("semantic_score"))
+                                reason_codes = [str(code) for code in (semantic_result.get("reason_codes") or []) if str(code)]
+                                notes = str(semantic_result.get("notes") or "").strip()
+
+                            candidate_entry["semantic_score"] = semantic_score
+                            candidate_entry["reason_codes"] = reason_codes
+                            candidate_entry["notes"] = notes
+                            candidate_entry["final_score"] = _blend_score(
+                                _clamp_score(candidate_entry.get("lexical_score")),
+                                semantic_score,
+                            )
+
+                        ranked_candidates = sorted(candidate_by_nct.values(), key=_candidate_sort_tuple, reverse=True)
+                        best_candidate = ranked_candidates[0]
+                        best_nct_id = str(best_candidate.get("nct_id") or "").strip()
+                        best_source = str(best_candidate.get("source") or CTG_SOURCE_TITLE)
+                        best_final_score = _clamp_score(best_candidate.get("final_score"))
+                        best_core_signal_count = count_core_reason_codes(best_candidate.get("reason_codes") or [])
+
+                        trial.ctg_candidate_pool = _build_candidate_pool(candidate_by_nct)
+                        trial.ctg_match_confidence = best_final_score
+                        if (
+                            best_nct_id
+                            and best_final_score >= CTG_AUTOFILL_FINAL_SCORE
+                            and best_core_signal_count >= CTG_AUTO_ACCEPT_MIN_CORE_SIGNALS
+                        ):
+                            trial.nct_id = best_nct_id
+                            trial.ctg_url = f"https://clinicaltrials.gov/study/{best_nct_id}"
                             _clear_ctg_candidate_fields(trial)
-                            trial.ctg_match_note = CTG_MATCH_NOTES_BY_SOURCE.get(
-                                best_source,
-                                CTG_MATCH_NOTES_BY_SOURCE[CTG_SOURCE_TITLE],
+                            trial.ctg_match_note = (
+                                f"{CTG_MATCH_NOTES_BY_SOURCE.get(best_source, CTG_MATCH_NOTES_BY_SOURCE[CTG_SOURCE_TITLE])}. "
+                                f"Final score {best_final_score:.2f}."
                             )
                         else:
                             trial.nct_id = None
                             trial.ctg_url = None
-                            trial.ctg_candidate_nct_id = best_candidate.get("nctId")
+                            trial.ctg_candidate_nct_id = best_nct_id or None
                             trial.ctg_candidate_url = (
-                                f"https://clinicaltrials.gov/study/{best_candidate['nctId']}"
-                                if best_candidate.get("nctId")
+                                f"https://clinicaltrials.gov/study/{best_nct_id}"
+                                if best_nct_id
                                 else None
                             )
                             trial.ctg_candidate_title = _candidate_title(best_candidate)
                             trial.ctg_candidate_source = best_source
-                            trial.ctg_match_note = "Candidate found; manual review recommended"
+                            trial.ctg_match_note = _manual_review_note(best_candidate)
                     elif total_title_searches and search_failures == total_title_searches:
                         trial.ctg_candidate_pool = None
+                        trial.ctg_match_confidence = 0.0
                         _clear_ctg_candidate_fields(trial)
                         trial.ctg_match_note = "CTG title search failed"
                     else:

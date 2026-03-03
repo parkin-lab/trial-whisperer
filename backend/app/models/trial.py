@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.sqltypes import JSON
 from sqlalchemy.types import UserDefinedType
@@ -40,7 +41,7 @@ class Trial(Base):
     ctg_candidate_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     ctg_candidate_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     ctg_candidate_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    ctg_candidate_pool: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    ctg_candidate_pool: Mapped[list[dict] | None] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=True)
     trial_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     document_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     ctg_match_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)

@@ -252,12 +252,22 @@ async def test_ctg_title_fallback_auto_fills_nct_when_confidence_high(db_session
         del args, kwargs
         return []
 
+    async def _score_candidate_semantic(**kwargs):
+        candidate = kwargs["candidate"]
+        return {
+            "nct_id": candidate["nct_id"],
+            "semantic_score": 1.0,
+            "reason_codes": ["disease_match", "intervention_match", "phase_match"],
+            "notes": "Strong disease and intervention alignment",
+        }
+
     monkeypatch.setattr(tasks, "storage_download_file", _download_file)
     monkeypatch.setattr(tasks, "get_local_path_for_extraction", lambda file_path, contents: file_path)
     monkeypatch.setattr(tasks, "extract_text", lambda _: "mock protocol text")
     monkeypatch.setattr(tasks, "extract_trial_metadata_from_text", _extract_metadata)
     monkeypatch.setattr(tasks, "search_studies", _search_studies)
     monkeypatch.setattr(tasks, "search_web", _search_web)
+    monkeypatch.setattr(tasks, "score_candidate_semantic", _score_candidate_semantic)
 
     await tasks.parse_trial_document({}, str(job.id))
 
@@ -266,11 +276,117 @@ async def test_ctg_title_fallback_auto_fills_nct_when_confidence_high(db_session
     assert updated_trial.nct_id == "NCT77778888"
     assert updated_trial.ctg_url == "https://clinicaltrials.gov/study/NCT77778888"
     assert updated_trial.ctg_match_confidence == pytest.approx(1.0)
-    assert updated_trial.ctg_match_note == "Auto-matched from CTG title search"
+    assert updated_trial.ctg_match_note.startswith("Auto-matched from CTG title search.")
+    assert isinstance(updated_trial.ctg_candidate_pool, list)
+    assert updated_trial.ctg_candidate_pool[0]["reason_codes"] == ["disease_match", "intervention_match", "phase_match"]
     assert "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia" in search_queries
     assert "Randomized Open-Label Multicenter Study of CAR-T in Patients with AML" in search_queries
     assert "Protocol Synopsis" in search_queries
     assert updated_trial.extraction_status == TrialExtractionStatus.ready
+
+
+async def test_ctg_semantic_rerank_lexical_miss_candidate_wins(db_session, monkeypatch):
+    user = await _create_user(db_session, email="pi-semantic@example.com", role=UserRole.pi)
+    trial = Trial(
+        nickname="Semantic Rerank Trial",
+        status=TrialStatus.draft,
+        extraction_status=TrialExtractionStatus.processing,
+        created_by=user.id,
+    )
+    db_session.add(trial)
+    await db_session.flush()
+
+    doc = TrialDocument(
+        trial_id=trial.id,
+        version=1,
+        filename="protocol.pdf",
+        file_path="/tmp/protocol-semantic-rerank.pdf",
+        uploaded_by=user.id,
+    )
+    db_session.add(doc)
+    await db_session.flush()
+
+    job = BackgroundJob(
+        type="parse_trial_document",
+        status=JobStatus.pending,
+        payload={"trial_id": str(trial.id), "document_id": str(doc.id), "file_path": doc.file_path},
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    testing_session_factory = async_sessionmaker(db_session.bind, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(tasks, "AsyncSessionLocal", testing_session_factory)
+
+    async def _download_file(file_path):
+        del file_path
+        return b"pdf bytes", "protocol.pdf"
+
+    async def _extract_metadata(text):
+        del text
+        return TrialMetadataExtraction(
+            indication=Indication.aml,
+            sponsor="Acme Biotherapeutics",
+            phase="Phase 2",
+            trial_title="Open-label study of cell therapy in relapsed AML adults",
+            document_title="Protocol Header",
+            title_candidates=["Open-label study of cell therapy in relapsed AML adults"],
+        )
+
+    async def _search_studies(query):
+        del query
+        return [
+            {
+                "nctId": "NCT11112222",
+                "officialTitle": "Open-label study of cell therapy in relapsed AML adults",
+                "phase": "Phase 2",
+                "sponsor": "Different Sponsor",
+            },
+            {
+                "nctId": "NCT33334444",
+                "officialTitle": "CD19 CAR-T in Refractory Acute Myeloid Leukemia",
+                "phase": "Phase 2",
+                "sponsor": "Acme Biotherapeutics",
+            },
+        ]
+
+    async def _search_web(*args, **kwargs):
+        del args, kwargs
+        return []
+
+    async def _score_candidate_semantic(**kwargs):
+        candidate = kwargs["candidate"]
+        if candidate["nct_id"] == "NCT33334444":
+            return {
+                "nct_id": candidate["nct_id"],
+                "semantic_score": 0.97,
+                "reason_codes": ["disease_match", "intervention_match", "phase_match"],
+                "notes": "Semantic evidence strongly supports this match",
+            }
+        return {
+            "nct_id": candidate["nct_id"],
+            "semantic_score": 0.25,
+            "reason_codes": ["phase_match"],
+            "notes": "Only phase aligns",
+        }
+
+    monkeypatch.setattr(tasks, "storage_download_file", _download_file)
+    monkeypatch.setattr(tasks, "get_local_path_for_extraction", lambda file_path, contents: file_path)
+    monkeypatch.setattr(tasks, "extract_text", lambda _: "mock protocol text")
+    monkeypatch.setattr(tasks, "extract_trial_metadata_from_text", _extract_metadata)
+    monkeypatch.setattr(tasks, "search_studies", _search_studies)
+    monkeypatch.setattr(tasks, "search_web", _search_web)
+    monkeypatch.setattr(tasks, "score_candidate_semantic", _score_candidate_semantic)
+
+    await tasks.parse_trial_document({}, str(job.id))
+
+    updated_trial = (await db_session.execute(select(Trial).where(Trial.id == trial.id))).scalar_one()
+
+    assert updated_trial.nct_id == "NCT33334444"
+    assert updated_trial.ctg_url == "https://clinicaltrials.gov/study/NCT33334444"
+    assert updated_trial.ctg_match_confidence == pytest.approx(0.923, rel=1e-3)
+    assert isinstance(updated_trial.ctg_candidate_pool, list)
+    assert updated_trial.ctg_candidate_pool[0]["nct_id"] == "NCT33334444"
+    assert "intervention_match" in updated_trial.ctg_candidate_pool[0]["reason_codes"]
 
 
 async def test_ctg_title_fallback_low_confidence_needs_manual_review(db_session, monkeypatch):
@@ -341,24 +457,36 @@ async def test_ctg_title_fallback_low_confidence_needs_manual_review(db_session,
         del args, kwargs
         return []
 
+    async def _score_candidate_semantic(**kwargs):
+        candidate = kwargs["candidate"]
+        return {
+            "nct_id": candidate["nct_id"],
+            "semantic_score": 0.1,
+            "reason_codes": ["sponsor_match"],
+            "notes": "Sponsor overlap only",
+        }
+
     monkeypatch.setattr(tasks, "storage_download_file", _download_file)
     monkeypatch.setattr(tasks, "get_local_path_for_extraction", lambda file_path, contents: file_path)
     monkeypatch.setattr(tasks, "extract_text", lambda _: "mock protocol text")
     monkeypatch.setattr(tasks, "extract_trial_metadata_from_text", _extract_metadata)
     monkeypatch.setattr(tasks, "search_studies", _search_studies)
     monkeypatch.setattr(tasks, "search_web", _search_web)
+    monkeypatch.setattr(tasks, "score_candidate_semantic", _score_candidate_semantic)
 
     await tasks.parse_trial_document({}, str(job.id))
 
     updated_trial = (await db_session.execute(select(Trial).where(Trial.id == trial.id))).scalar_one()
 
     assert updated_trial.nct_id is None
-    assert updated_trial.ctg_match_confidence == pytest.approx(0.0)
-    assert updated_trial.ctg_match_note == "Candidate found; manual review recommended"
+    assert updated_trial.ctg_match_confidence == pytest.approx(0.09)
+    assert "below auto-accept threshold" in (updated_trial.ctg_match_note or "")
     assert updated_trial.ctg_candidate_nct_id == "NCT00001111"
     assert updated_trial.ctg_candidate_url == "https://clinicaltrials.gov/study/NCT00001111"
     assert updated_trial.ctg_candidate_title == "Observational Registry for Long-Term Outcomes in Solid Tumors"
     assert updated_trial.ctg_candidate_source == tasks.CTG_SOURCE_TITLE
+    assert isinstance(updated_trial.ctg_candidate_pool, list)
+    assert updated_trial.ctg_candidate_pool[0]["reason_codes"] == ["sponsor_match"]
     assert "A Phase 2 Study of CAR-T in Acute Myeloid Leukemia" in search_queries
     assert "Open-Label Study in Patients with AML" in search_queries
     assert "Protocol Header" in search_queries
@@ -551,19 +679,29 @@ async def test_ctg_title_miss_keyword_search_auto_fills_nct(db_session, monkeypa
         del args, kwargs
         return []
 
+    async def _score_candidate_semantic(**kwargs):
+        candidate = kwargs["candidate"]
+        return {
+            "nct_id": candidate["nct_id"],
+            "semantic_score": 0.96,
+            "reason_codes": ["disease_match", "intervention_match", "phase_match"],
+            "notes": "Keyword match strongly aligns",
+        }
+
     monkeypatch.setattr(tasks, "storage_download_file", _download_file)
     monkeypatch.setattr(tasks, "get_local_path_for_extraction", lambda file_path, contents: file_path)
     monkeypatch.setattr(tasks, "extract_text", lambda _: "mock protocol text")
     monkeypatch.setattr(tasks, "extract_trial_metadata_from_text", _extract_metadata)
     monkeypatch.setattr(tasks, "search_studies", _search_studies)
     monkeypatch.setattr(tasks, "search_web", _search_web)
+    monkeypatch.setattr(tasks, "score_candidate_semantic", _score_candidate_semantic)
 
     await tasks.parse_trial_document({}, str(job.id))
 
     updated_trial = (await db_session.execute(select(Trial).where(Trial.id == trial.id))).scalar_one()
 
     assert updated_trial.nct_id == "NCT88889999"
-    assert updated_trial.ctg_match_note == "Auto-matched from CTG keyword search"
+    assert updated_trial.ctg_match_note.startswith("Auto-matched from CTG keyword search.")
     assert any("xyz-101" in query.lower() and "city" in query.lower() and "hope" in query.lower() for query in search_queries)
 
 
@@ -651,6 +789,15 @@ async def test_ctg_title_miss_web_fallback_extracts_nct(db_session, monkeypatch)
             ]
         }
 
+    async def _score_candidate_semantic(**kwargs):
+        candidate = kwargs["candidate"]
+        return {
+            "nct_id": candidate["nct_id"],
+            "semantic_score": 0.95,
+            "reason_codes": ["disease_match", "intervention_match", "phase_match"],
+            "notes": "Web fallback candidate has strong semantic alignment",
+        }
+
     monkeypatch.setattr(tasks, "storage_download_file", _download_file)
     monkeypatch.setattr(tasks, "get_local_path_for_extraction", lambda file_path, contents: file_path)
     monkeypatch.setattr(tasks, "extract_text", lambda _: "mock protocol text")
@@ -658,11 +805,12 @@ async def test_ctg_title_miss_web_fallback_extracts_nct(db_session, monkeypatch)
     monkeypatch.setattr(tasks, "search_studies", _search_studies)
     monkeypatch.setattr(tasks, "search_web", _search_web)
     monkeypatch.setattr(tasks, "fetch_study", _fetch_study)
+    monkeypatch.setattr(tasks, "score_candidate_semantic", _score_candidate_semantic)
 
     await tasks.parse_trial_document({}, str(job.id))
 
     updated_trial = (await db_session.execute(select(Trial).where(Trial.id == trial.id))).scalar_one()
 
     assert updated_trial.nct_id == "NCT99990000"
-    assert updated_trial.ctg_match_note == "Auto-matched from CTG web fallback"
+    assert updated_trial.ctg_match_note.startswith("Auto-matched from CTG web fallback.")
     assert any(query.startswith("site:clinicaltrials.gov ") for query in web_queries)

@@ -120,8 +120,13 @@ class CtgCandidateRead(BaseModel):
     nct_id: str
     title: str | None = None
     url: str | None = None
-    confidence: float | None = None
     source: str | None = None
+    lexical_score: float | None = None
+    semantic_score: float | None = None
+    final_score: float | None = None
+    reason_codes: list[str] = Field(default_factory=list)
+    notes: str | None = None
+    confidence: float | None = None
 
 
 class CtgCandidateAcceptRequest(BaseModel):
@@ -130,6 +135,7 @@ class CtgCandidateAcceptRequest(BaseModel):
     url: str | None = None
     source: str | None = None
     confidence: float | None = None
+    final_score: float | None = None
 
 
 class ParsedCriterion(BaseModel):

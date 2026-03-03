@@ -70,11 +70,16 @@ def _candidate_pool_from_trial(trial: Trial) -> list[CtgCandidateRead]:
                 nct_id=nct_id,
                 title=item.get("title"),
                 url=item.get("url"),
-                confidence=item.get("confidence"),
                 source=item.get("source"),
+                lexical_score=item.get("lexical_score"),
+                semantic_score=item.get("semantic_score"),
+                final_score=item.get("final_score"),
+                reason_codes=[str(code) for code in (item.get("reason_codes") or []) if str(code).strip()],
+                notes=item.get("notes"),
+                confidence=item.get("final_score", item.get("confidence")),
             )
         )
-    return validated[:3]
+    return validated[:5]
 
 
 async def _get_trial_or_404(db: AsyncSession, trial_id: UUID) -> Trial:
@@ -321,6 +326,11 @@ async def get_ctg_candidates(
                 nct_id=trial.ctg_candidate_nct_id,
                 title=trial.ctg_candidate_title,
                 url=trial.ctg_candidate_url or _build_ctg_url(trial.ctg_candidate_nct_id),
+                lexical_score=None,
+                semantic_score=None,
+                final_score=trial.ctg_match_confidence,
+                reason_codes=[],
+                notes=trial.ctg_match_note,
                 confidence=trial.ctg_match_confidence,
                 source=trial.ctg_candidate_source,
             )
@@ -356,8 +366,10 @@ async def accept_ctg_candidate(
     trial.ctg_candidate_title = None
     trial.ctg_candidate_source = None
     trial.ctg_candidate_pool = None
-    if payload and payload.confidence is not None:
-        trial.ctg_match_confidence = payload.confidence
+    if payload:
+        selected_confidence = payload.final_score if payload.final_score is not None else payload.confidence
+        if selected_confidence is not None:
+            trial.ctg_match_confidence = selected_confidence
     trial.ctg_match_note = "Candidate manually accepted"
 
     await db.commit()
