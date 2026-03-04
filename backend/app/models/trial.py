@@ -60,6 +60,7 @@ class Trial(Base):
     )
     extraction_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     extraction_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    metadata_locked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     pi_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     coordinator_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_by: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="RESTRICT"))

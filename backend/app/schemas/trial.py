@@ -44,6 +44,7 @@ class TrialUpdate(BaseModel):
     pi_id: UUID | None = None
     coordinator_id: UUID | None = None
     status: TrialStatus | None = None
+    metadata_locked: bool | None = None
 
 
 class TrialRead(BaseModel):
@@ -69,6 +70,7 @@ class TrialRead(BaseModel):
     extraction_status: TrialExtractionStatus
     extraction_started_at: datetime | None
     extraction_completed_at: datetime | None
+    metadata_locked: bool
     pi_id: UUID | None
     coordinator_id: UUID | None
     created_by: UUID
@@ -175,6 +177,10 @@ class TrialCriterionUpdate(BaseModel):
     manual_review_required: bool | None = None
     parse_status: CriteriaParseStatus | None = None
     approve: bool | None = None
+
+
+class TrialCriteriaBatchIds(BaseModel):
+    criterion_ids: list[UUID] = Field(default_factory=list)
 
 
 class CriteriaReviewStatusRead(BaseModel):

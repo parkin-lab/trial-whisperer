@@ -20,9 +20,17 @@ const parseStatusClass = {
 }
 
 const extractionStatusClass = {
-  processing: 'bg-sky-100 text-sky-800',
+  processing: 'bg-amber-100 text-amber-800',
   ready: 'bg-emerald-100 text-emerald-800',
-  needs_review: 'bg-amber-100 text-amber-800',
+  needs_review: 'bg-sky-100 text-sky-800',
+  failed: 'bg-rose-100 text-rose-800',
+}
+
+const extractionStatusLabel = {
+  processing: 'processing',
+  ready: 'ready',
+  needs_review: 'needs_review',
+  failed: 'failed',
 }
 
 const reasonLabelMap = {
@@ -73,6 +81,7 @@ export default function TrialDetail({ onLogout }) {
   const [editParseStatus, setEditParseStatus] = useState('needs_review')
   const [editManualReview, setEditManualReview] = useState(false)
   const [criteriaBusy, setCriteriaBusy] = useState(false)
+  const [criteriaProcessingMode, setCriteriaProcessingMode] = useState('')
   const [criteriaToast, setCriteriaToast] = useState('')
   const [auditEntries, setAuditEntries] = useState([])
   const [auditError, setAuditError] = useState('')
@@ -83,12 +92,13 @@ export default function TrialDetail({ onLogout }) {
   const [trialBusy, setTrialBusy] = useState(false)
   const [trialError, setTrialError] = useState('')
   const [candidateBusy, setCandidateBusy] = useState(false)
+  const [ctgMatchBusy, setCtgMatchBusy] = useState(false)
   const [candidateError, setCandidateError] = useState('')
   const [ctgCandidates, setCtgCandidates] = useState([])
   const [metadataForm, setMetadataForm] = useState({
     nickname: '',
     trial_title: '',
-    document_title: '',
+
     nct_id: '',
     ctg_url: '',
     indication: '',
@@ -98,6 +108,7 @@ export default function TrialDetail({ onLogout }) {
   const [metadataBusy, setMetadataBusy] = useState(false)
   const [metadataError, setMetadataError] = useState('')
   const [metadataSaved, setMetadataSaved] = useState('')
+  const [isEditingMetadata, setIsEditingMetadata] = useState(true)
   const [awarenessOpen, setAwarenessOpen] = useState(false)
 
   if (!user) {
@@ -138,12 +149,25 @@ export default function TrialDetail({ onLogout }) {
     setSnapshots(snapshotRes.data ? [snapshotRes.data] : [])
   }
 
-  const loadCtgCandidates = async () => {
+  const loadCtgCandidates = async ({ showProgress = false } = {}) => {
+    if (showProgress) {
+      setCtgMatchBusy(true)
+      setCandidateError('')
+    }
     try {
       const res = await api.get(`/trials/${id}/ctg/candidates`)
       setCtgCandidates(Array.isArray(res.data) ? res.data.slice(0, 5) : [])
+      return true
     } catch {
       setCtgCandidates([])
+      if (showProgress) {
+        setCandidateError('Could not match CTG candidates.')
+      }
+      return false
+    } finally {
+      if (showProgress) {
+        setCtgMatchBusy(false)
+      }
     }
   }
 
@@ -191,13 +215,13 @@ export default function TrialDetail({ onLogout }) {
     setMetadataForm({
       nickname: trial.nickname || '',
       trial_title: trial.trial_title || '',
-      document_title: trial.document_title || '',
       nct_id: trial.nct_id || '',
       ctg_url: trial.ctg_url || '',
       indication: trial.indication || '',
       phase: trial.phase || '',
       sponsor: trial.sponsor || '',
     })
+    setIsEditingMetadata(!(trial.metadata_locked ?? false))
   }, [trial])
 
   useEffect(() => {
@@ -210,33 +234,19 @@ export default function TrialDetail({ onLogout }) {
     return () => window.clearTimeout(timeoutId)
   }, [criteriaToast])
 
-  const parseCriteria = async () => {
-    setCriteriaBusy(true)
-    setCriteriaError('')
-    try {
-      await api.post(`/trials/${id}/criteria/parse`)
-      await loadCriteria(criteriaView)
-    } catch (err) {
-      setCriteriaError(err.response?.data?.detail || 'Criteria parsing failed.')
-    } finally {
-      setCriteriaBusy(false)
-    }
-  }
-
-  const reextractCriteriaWithAi = async () => {
+  const extractCriteria = async () => {
     if (!canReview || criteriaBusy) return
-    const confirmed = window.confirm('Replace current criteria rows with AI extraction?')
-    if (!confirmed) return
-
     setCriteriaBusy(true)
+    setCriteriaProcessingMode('extract')
     setCriteriaError('')
     try {
       await api.post(`/trials/${id}/criteria/reextract-ai`)
       await loadCriteria(criteriaView)
-      setCriteriaToast('AI re-extraction complete.')
+      setCriteriaToast('Criteria extraction complete.')
     } catch (err) {
-      setCriteriaError(err.response?.data?.detail || 'AI re-extraction failed.')
+      setCriteriaError(err.response?.data?.detail || 'Criteria extraction failed.')
     } finally {
+      setCriteriaProcessingMode('')
       setCriteriaBusy(false)
     }
   }
@@ -262,6 +272,50 @@ export default function TrialDetail({ onLogout }) {
       await loadCriteria(criteriaView)
     } catch (err) {
       setCriteriaError(err.response?.data?.detail || 'Bulk approve failed.')
+    } finally {
+      setCriteriaBusy(false)
+    }
+  }
+
+  const approveAllVisible = async () => {
+    if (!canReview || criteriaBusy) return
+    const visibleRows = criteria.filter((row) => !row.approved_at && (row.text || '').trim())
+    if (visibleRows.length === 0) {
+      setCriteriaToast('No visible criteria to approve.')
+      return
+    }
+
+    setCriteriaBusy(true)
+    setCriteriaError('')
+    try {
+      for (const row of visibleRows) {
+        await api.post(`/trials/${id}/criteria/${row.id}/approve`)
+      }
+      await loadCriteria(criteriaView)
+      setCriteriaToast(`Approved ${visibleRows.length} visible criteria.`)
+    } catch (err) {
+      setCriteriaError(err.response?.data?.detail || 'Approve visible failed.')
+    } finally {
+      setCriteriaBusy(false)
+    }
+  }
+
+  const markVisibleManualOnly = async () => {
+    if (!canReview || criteriaBusy) return
+    const visibleIds = criteria.filter((row) => row.parse_status !== 'manual_only').map((row) => row.id)
+    if (visibleIds.length === 0) {
+      setCriteriaToast('All visible criteria are already manual-only.')
+      return
+    }
+
+    setCriteriaBusy(true)
+    setCriteriaError('')
+    try {
+      await api.post(`/trials/${id}/criteria/mark-manual-visible`, { criterion_ids: visibleIds })
+      await loadCriteria(criteriaView)
+      setCriteriaToast(`Marked ${visibleIds.length} visible criteria as manual-only.`)
+    } catch (err) {
+      setCriteriaError(err.response?.data?.detail || 'Mark manual-only failed.')
     } finally {
       setCriteriaBusy(false)
     }
@@ -347,7 +401,6 @@ export default function TrialDetail({ onLogout }) {
       const payload = {
         nickname,
         trial_title: metadataForm.trial_title.trim() || null,
-        document_title: metadataForm.document_title.trim() || null,
         nct_id: metadataForm.nct_id.trim() || null,
         ctg_url: metadataForm.ctg_url.trim() || null,
         indication: metadataForm.indication || null,
@@ -356,12 +409,29 @@ export default function TrialDetail({ onLogout }) {
       }
       const res = await api.patch(`/trials/${id}`, payload)
       setTrial(res.data)
+      setIsEditingMetadata(false)
       setMetadataSaved('Metadata updated.')
     } catch (err) {
       setMetadataError(err.response?.data?.detail || 'Could not update trial metadata.')
     } finally {
       setMetadataBusy(false)
     }
+  }
+
+  const cancelMetadataEdit = () => {
+    if (!trial) return
+    setMetadataForm({
+      nickname: trial.nickname || '',
+      trial_title: trial.trial_title || '',
+      nct_id: trial.nct_id || '',
+      ctg_url: trial.ctg_url || '',
+      indication: trial.indication || '',
+      phase: trial.phase || '',
+      sponsor: trial.sponsor || '',
+    })
+    setMetadataError('')
+    setMetadataSaved('')
+    setIsEditingMetadata(false)
   }
 
   const acceptCtgCandidate = async (candidate = null) => {
@@ -391,6 +461,11 @@ export default function TrialDetail({ onLogout }) {
     } finally {
       setCandidateBusy(false)
     }
+  }
+
+  const matchCtgCandidates = async () => {
+    if (!canEditMetadata || ctgMatchBusy || candidateBusy) return
+    await loadCtgCandidates({ showProgress: true })
   }
 
   const openEdit = (criterion) => {
@@ -544,43 +619,23 @@ export default function TrialDetail({ onLogout }) {
             </button>
           </div>
 
-          {(canArchive || canDelete) && (
-            <div className="rounded-xl border border-slate-200 bg-white p-4">
-              <h4 className="font-display text-lg">Trial Actions</h4>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {canArchive && (
-                  <button
-                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                    onClick={archiveTrial}
-                    disabled={trialBusy || trial.status === 'archived'}
-                  >
-                    Archive Trial
-                  </button>
-                )}
-                {canDelete && (
-                  <button
-                    className="rounded-lg border border-rose-300 px-3 py-2 text-sm text-rose-700"
-                    onClick={deleteTrial}
-                    disabled={trialBusy}
-                  >
-                    Delete Trial
-                  </button>
-                )}
-              </div>
-              {trialError && (
-                <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-                  {trialError}
-                </div>
-              )}
-            </div>
-          )}
-
           <div className="rounded-xl border border-slate-200 bg-white p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h4 className="font-display text-lg">Trial Metadata</h4>
-              <span className={`badge ${extractionStatusClass[trial.extraction_status] || 'bg-slate-100 text-slate-700'}`}>
-                extraction: {trial.extraction_status}
-              </span>
+              <div className="flex items-center gap-2">
+                {canEditMetadata && !isEditingMetadata && (
+                  <button
+                    className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs"
+                    onClick={() => setIsEditingMetadata(true)}
+                  >
+                    Edit Metadata
+                  </button>
+                )}
+                <span className={`badge ${extractionStatusClass[trial.extraction_status] || 'bg-slate-100 text-slate-700'}`}>
+                  {trial.extraction_status === 'processing' && <SpinnerIcon className="mr-1 inline-block h-3 w-3 align-[-1px]" />}
+                  extraction: {extractionStatusLabel[trial.extraction_status] || trial.extraction_status}
+                </span>
+              </div>
             </div>
             {trial.extraction_status === 'processing' && (
               <div className="mt-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800">
@@ -594,7 +649,7 @@ export default function TrialDetail({ onLogout }) {
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                   value={metadataForm.nickname}
                   onChange={(e) => setMetadataForm((previous) => ({ ...previous, nickname: e.target.value }))}
-                  disabled={!canEditMetadata || metadataBusy}
+                  disabled={!canEditMetadata || metadataBusy || !isEditingMetadata}
                 />
               </div>
               <div className="md:col-span-2">
@@ -603,16 +658,7 @@ export default function TrialDetail({ onLogout }) {
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                   value={metadataForm.trial_title}
                   onChange={(e) => setMetadataForm((previous) => ({ ...previous, trial_title: e.target.value }))}
-                  disabled={!canEditMetadata || metadataBusy}
-                />
-              </div>
-              <div className="md:col-span-2">
-                <p className="text-xs uppercase tracking-wide text-slate-500">Document Title</p>
-                <input
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                  value={metadataForm.document_title}
-                  onChange={(e) => setMetadataForm((previous) => ({ ...previous, document_title: e.target.value }))}
-                  disabled={!canEditMetadata || metadataBusy}
+                  disabled={!canEditMetadata || metadataBusy || !isEditingMetadata}
                 />
               </div>
               <div>
@@ -621,7 +667,7 @@ export default function TrialDetail({ onLogout }) {
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                   value={metadataForm.nct_id}
                   onChange={(e) => setMetadataForm((previous) => ({ ...previous, nct_id: e.target.value }))}
-                  disabled={!canEditMetadata || metadataBusy}
+                  disabled={!canEditMetadata || metadataBusy || !isEditingMetadata}
                 />
               </div>
               <div>
@@ -630,7 +676,7 @@ export default function TrialDetail({ onLogout }) {
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                   value={metadataForm.ctg_url}
                   onChange={(e) => setMetadataForm((previous) => ({ ...previous, ctg_url: e.target.value }))}
-                  disabled={!canEditMetadata || metadataBusy}
+                  disabled={!canEditMetadata || metadataBusy || !isEditingMetadata}
                 />
                 {trial.ctg_url && (
                   <a
@@ -649,7 +695,7 @@ export default function TrialDetail({ onLogout }) {
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                   value={metadataForm.indication}
                   onChange={(e) => setMetadataForm((previous) => ({ ...previous, indication: e.target.value }))}
-                  disabled={!canEditMetadata || metadataBusy}
+                  disabled={!canEditMetadata || metadataBusy || !isEditingMetadata}
                 >
                   <option value="">Unknown</option>
                   <option value="aml">AML</option>
@@ -666,7 +712,7 @@ export default function TrialDetail({ onLogout }) {
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                   value={metadataForm.phase}
                   onChange={(e) => setMetadataForm((previous) => ({ ...previous, phase: e.target.value }))}
-                  disabled={!canEditMetadata || metadataBusy}
+                  disabled={!canEditMetadata || metadataBusy || !isEditingMetadata}
                 />
               </div>
               <div>
@@ -675,7 +721,7 @@ export default function TrialDetail({ onLogout }) {
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                   value={metadataForm.sponsor}
                   onChange={(e) => setMetadataForm((previous) => ({ ...previous, sponsor: e.target.value }))}
-                  disabled={!canEditMetadata || metadataBusy}
+                  disabled={!canEditMetadata || metadataBusy || !isEditingMetadata}
                 />
               </div>
             </div>
@@ -687,7 +733,27 @@ export default function TrialDetail({ onLogout }) {
               <div className="mt-1">
                 <span className="font-medium">CTG match note:</span> {trial.ctg_match_note || 'N/A'}
               </div>
+              {canEditMetadata && (
+                <div className="mt-3">
+                  <button
+                    className="rounded-lg border border-slate-300 px-3 py-2 text-xs disabled:opacity-50"
+                    onClick={matchCtgCandidates}
+                    disabled={ctgMatchBusy || candidateBusy}
+                  >
+                    {ctgMatchBusy ? 'Matching...' : 'Match CTG Candidates'}
+                  </button>
+                </div>
+              )}
             </div>
+            {ctgMatchBusy && (
+              <div className="mt-3 flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800">
+                <SpinnerIcon />
+                <span>Matching CTG candidates...</span>
+              </div>
+            )}
+            {!ctgMatchBusy && candidateError && (
+              <p className="mt-3 text-sm text-rose-700">{candidateError}</p>
+            )}
             {!trial.nct_id && ctgCandidates.length > 0 && (
               <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
                 <p className="font-semibold">Top CTG candidates</p>
@@ -748,7 +814,6 @@ export default function TrialDetail({ onLogout }) {
                     </div>
                   ))}
                 </div>
-                {candidateError && <p className="mt-2 text-sm text-rose-700">{candidateError}</p>}
               </div>
             )}
             {!trial.nct_id && ctgCandidates.length === 0 && (
@@ -760,7 +825,6 @@ export default function TrialDetail({ onLogout }) {
                 <p className="mt-2 text-xs">
                   Suggested query: <span className="font-mono">{suggestedManualCtgQuery}</span>
                 </p>
-                {candidateError && <p className="mt-2 text-sm text-rose-700">{candidateError}</p>}
               </div>
             )}
             <div className="mt-4 grid gap-3 md:grid-cols-2">
@@ -770,7 +834,7 @@ export default function TrialDetail({ onLogout }) {
                 value={qaStatus?.embeddings_exist ? `Indexed (${qaStatus.chunk_count} chunks)` : 'Pending'}
               />
             </div>
-            {canEditMetadata && (
+            {canEditMetadata && isEditingMetadata && (
               <div className="mt-4 flex flex-wrap items-center gap-3">
                 <button
                   className="rounded-lg bg-ink px-4 py-2 text-sm text-white disabled:opacity-50"
@@ -779,6 +843,15 @@ export default function TrialDetail({ onLogout }) {
                 >
                   {metadataBusy ? 'Saving...' : 'Save Metadata'}
                 </button>
+                {trial.metadata_locked && (
+                  <button
+                    className="rounded-lg border border-slate-300 px-4 py-2 text-sm"
+                    onClick={cancelMetadataEdit}
+                    disabled={metadataBusy}
+                  >
+                    Cancel
+                  </button>
+                )}
                 {metadataSaved && <span className="text-sm text-emerald-700">{metadataSaved}</span>}
                 {metadataError && <span className="text-sm text-rose-700">{metadataError}</span>}
               </div>
@@ -802,6 +875,37 @@ export default function TrialDetail({ onLogout }) {
               </div>
             )}
           </div>
+
+          {(canArchive || canDelete) && (
+            <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <h4 className="font-display text-lg">Trial Actions</h4>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {canArchive && (
+                  <button
+                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    onClick={archiveTrial}
+                    disabled={trialBusy || trial.status === 'archived'}
+                  >
+                    Archive Trial
+                  </button>
+                )}
+                {canDelete && (
+                  <button
+                    className="rounded-lg border border-rose-300 px-3 py-2 text-sm text-rose-700"
+                    onClick={deleteTrial}
+                    disabled={trialBusy}
+                  >
+                    Delete Trial
+                  </button>
+                )}
+              </div>
+              {trialError && (
+                <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                  {trialError}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )
     }
@@ -849,35 +953,56 @@ export default function TrialDetail({ onLogout }) {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h4 className="font-display text-lg">Criteria Review</h4>
               {canReview && (
-                <div className="flex flex-wrap gap-2">
+                <div>
                   <button
-                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                    onClick={parseCriteria}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:opacity-50"
+                    onClick={extractCriteria}
                     disabled={criteriaBusy}
                   >
-                    Parse Criteria
+                    {criteriaProcessingMode === 'extract' ? 'Extract Criteria ...' : 'Extract Criteria'}
                   </button>
-                  <button
-                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                    onClick={reextractCriteriaWithAi}
-                    disabled={criteriaBusy}
-                  >
-                    Re-extract with AI
-                  </button>
-                  <button
-                    className="rounded-lg bg-ink px-3 py-2 text-sm text-white disabled:opacity-50"
-                    onClick={approveReviewed}
-                    disabled={criteriaBusy}
-                  >
-                    Approve Reviewed
-                  </button>
+                  <p className="mt-1 text-xs text-slate-500">AI-first extraction with deterministic guardrails under the hood.</p>
                 </div>
               )}
             </div>
 
+            {criteriaProcessingMode === 'extract' && (
+              <div className="mt-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                <SpinnerIcon />
+                <span>Extracting criteria... this can take up to 2 minutes.</span>
+              </div>
+            )}
+
             {reviewStatus && (
               <div className="mt-3 rounded-lg bg-fog px-3 py-2 text-sm text-slate-700">
                 {reviewStatus.approved} of {reviewStatus.total} criteria approved - {reviewStatus.blocking_count} blocking activation
+              </div>
+            )}
+
+            {canReview && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  className="rounded-lg bg-ink px-3 py-2 text-sm text-white disabled:opacity-50"
+                  onClick={approveReviewed}
+                  disabled={criteriaBusy}
+                >
+                  Approve Reviewed
+                </button>
+                <button
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:opacity-50"
+                  onClick={approveAllVisible}
+                  disabled={criteriaBusy}
+                >
+                  Approve All Visible
+                </button>
+                <button
+                  className="rounded-lg border border-violet-300 px-3 py-2 text-sm text-violet-800 disabled:opacity-50"
+                  onClick={markVisibleManualOnly}
+                  disabled={criteriaBusy}
+                  title="Keep as text criterion; do not require structured rule."
+                >
+                  Mark Visible Manual-only
+                </button>
               </div>
             )}
 
@@ -910,9 +1035,15 @@ export default function TrialDetail({ onLogout }) {
                   <tr>
                     <th className="px-4 py-3">#</th>
                     <th className="px-4 py-3">Criterion text</th>
-                    <th className="px-4 py-3">Structured mapping</th>
-                    <th className="px-4 py-3">Confidence</th>
-                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">
+                      <span title="Machine-readable rule used for automated screening. Optional.">Structured mapping</span>
+                    </th>
+                    <th className="px-4 py-3">
+                      <span title="Extraction confidence (high vs needs review).">Confidence</span>
+                    </th>
+                    <th className="px-4 py-3">
+                      <span title="Workflow state for reviewer action.">Status</span>
+                    </th>
                     <th className="px-4 py-3">Actions</th>
                   </tr>
                 </thead>
@@ -945,6 +1076,7 @@ export default function TrialDetail({ onLogout }) {
                               <button
                                 className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
                                 onClick={() => openEdit(row)}
+                                disabled={criteriaBusy}
                               >
                                 Edit
                               </button>
@@ -968,6 +1100,7 @@ export default function TrialDetail({ onLogout }) {
                                 className="rounded-lg border border-violet-300 px-2 py-1 text-xs text-violet-800"
                                 onClick={() => toggleManualOnly(row)}
                                 disabled={criteriaBusy}
+                                title="Keep as text criterion; do not require structured rule."
                               >
                                 {row.parse_status === 'manual_only' ? 'Manual-only: On' : 'Mark Manual-only'}
                               </button>
@@ -1141,6 +1274,7 @@ export default function TrialDetail({ onLogout }) {
     reviewStatus,
     criteriaError,
     criteriaBusy,
+    criteriaProcessingMode,
     auditEntries,
     auditError,
     auditBusy,
@@ -1153,6 +1287,7 @@ export default function TrialDetail({ onLogout }) {
     trialError,
     ctgCandidates,
     candidateBusy,
+    ctgMatchBusy,
     candidateError,
     documentsByVersion,
     canEditMetadata,
@@ -1171,7 +1306,8 @@ export default function TrialDetail({ onLogout }) {
           <h2 className="font-display text-2xl">{trial?.nickname || 'Trial Detail'}</h2>
           {trial?.extraction_status && (
             <span className={`badge ${extractionStatusClass[trial.extraction_status] || 'bg-slate-100 text-slate-700'}`}>
-              {trial.extraction_status}
+              {trial.extraction_status === 'processing' && <SpinnerIcon className="mr-1 inline-block h-3 w-3 align-[-1px]" />}
+              {extractionStatusLabel[trial.extraction_status] || trial.extraction_status}
             </span>
           )}
         </div>
@@ -1301,5 +1437,14 @@ function Card({ label, value }) {
       <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
       <p className="mt-1 text-sm font-semibold text-ink">{value}</p>
     </div>
+  )
+}
+
+function SpinnerIcon({ className = 'h-4 w-4' }) {
+  return (
+    <svg className={`${className} animate-spin`} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+    </svg>
   )
 }

@@ -278,12 +278,11 @@ async def update_trial(
                 detail=f"{len(blocking)} criteria must be approved before activating this trial",
             )
 
-    for field in {
+    editable_metadata_fields = {
         "nickname",
         "nct_id",
         "ctg_url",
         "trial_title",
-        "document_title",
         "ctg_match_confidence",
         "ctg_match_note",
         "indication",
@@ -291,10 +290,15 @@ async def update_trial(
         "sponsor",
         "pi_id",
         "coordinator_id",
-        "status",
-    }:
+    }
+
+    for field in editable_metadata_fields | {"status", "metadata_locked"}:
         if field in updates:
             setattr(trial, field, updates[field])
+
+    # First explicit metadata save locks overview into view mode by default
+    if any(field in updates for field in editable_metadata_fields):
+        trial.metadata_locked = True
 
     if "nct_id" in updates and "ctg_url" not in updates:
         trial.ctg_url = _build_ctg_url(trial.nct_id)
