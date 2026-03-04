@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from difflib import SequenceMatcher
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID
@@ -15,11 +17,12 @@ from app.models.enums import ConfidenceLevel, CriteriaParseStatus, CriteriaType,
 from app.models.trial import Trial, TrialCriteria, TrialDocument
 from app.models.user import User
 from app.schemas.trial import CriteriaReviewStatusRead, TrialCriterionRead, TrialCriterionUpdate
-from app.services.criteria_parser import parse_criteria_from_text
+from app.services.criteria_parser import parse_criteria_from_text, parse_criteria_with_ai_from_text
 from app.services.documents import extract_text
 from app.services.storage import download_file as storage_download_file, get_local_path_for_extraction
 
 ENGINE_RULE_VERSION = "1.0.0"
+GROUNDING_FUZZY_THRESHOLD = 0.78
 
 router = APIRouter(tags=["criteria"])
 
@@ -40,6 +43,78 @@ async def _get_criterion_or_404(db: AsyncSession, trial_id: UUID, criterion_id: 
     if criterion is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Criterion not found")
     return criterion
+
+
+async def _get_latest_document_text_or_422(db: AsyncSession, trial_id: UUID) -> tuple[TrialDocument, str]:
+    latest_doc_result = await db.execute(
+        select(TrialDocument).where(TrialDocument.trial_id == trial_id).order_by(TrialDocument.version.desc())
+    )
+    latest_doc = latest_doc_result.scalars().first()
+    if latest_doc is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No protocol document uploaded")
+
+    contents, _ = await storage_download_file(latest_doc.file_path)
+    tmp_path = get_local_path_for_extraction(latest_doc.file_path, contents)
+    text = extract_text(tmp_path)
+    if not text.strip():
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Could not extract text from document")
+    return latest_doc, text
+
+
+def _normalize_for_grounding(value: str) -> str:
+    lowered = value.lower()
+    lowered = re.sub(r"[^a-z0-9\s]", " ", lowered)
+    return re.sub(r"\s+", " ", lowered).strip()
+
+
+def _build_protocol_match_chunks(protocol_text: str) -> list[str]:
+    chunks: list[str] = []
+    seen: set[str] = set()
+    for line in protocol_text.splitlines():
+        for piece in re.split(r"(?<=[.;!?])\s+", line):
+            normalized = _normalize_for_grounding(piece)
+            if not normalized or len(normalized) < 8:
+                continue
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            chunks.append(normalized)
+    return chunks
+
+
+def _is_criterion_grounded(
+    criterion_text: str,
+    protocol_normalized: str,
+    protocol_chunks: list[str],
+    quote_snippet: str | None,
+) -> bool:
+    normalized_criterion = _normalize_for_grounding(criterion_text)
+    if not normalized_criterion:
+        return False
+
+    if normalized_criterion in protocol_normalized:
+        return True
+
+    if quote_snippet:
+        normalized_quote = _normalize_for_grounding(quote_snippet)
+        if normalized_quote and normalized_quote in protocol_normalized:
+            return True
+
+    criterion_tokens = set(normalized_criterion.split())
+    if not criterion_tokens:
+        return False
+
+    best_ratio = 0.0
+    for chunk in protocol_chunks:
+        chunk_tokens = set(chunk.split())
+        if not (criterion_tokens & chunk_tokens):
+            continue
+        ratio = SequenceMatcher(None, normalized_criterion, chunk).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            if best_ratio >= GROUNDING_FUZZY_THRESHOLD:
+                return True
+    return False
 
 
 def _normalize_parse_payload(item_expression: dict | None, item_confidence: ConfidenceLevel, item_parse_status: CriteriaParseStatus | None) -> tuple[dict | None, ConfidenceLevel, bool, CriteriaParseStatus]:
@@ -68,20 +143,7 @@ async def parse_trial_criteria(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[TrialCriterionRead]:
     await _get_trial_or_404(db, trial_id)
-
-    latest_doc_result = await db.execute(
-        select(TrialDocument).where(TrialDocument.trial_id == trial_id).order_by(TrialDocument.version.desc())
-    )
-    latest_doc = latest_doc_result.scalars().first()
-    if latest_doc is None:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No protocol document uploaded")
-
-    contents, _ = await storage_download_file(latest_doc.file_path)
-    tmp_path = get_local_path_for_extraction(latest_doc.file_path, contents)
-    text = extract_text(tmp_path)
-
-    if not text.strip():
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Could not extract text from document")
+    latest_doc, text = await _get_latest_document_text_or_422(db, trial_id)
 
     parsed = await parse_criteria_from_text(text)
 
@@ -113,6 +175,81 @@ async def parse_trial_criteria(
             manual_review_required=manual_review_required or item.manual_review_required,
             source_order=item.source_order,
             section_label=item.section_label,
+            parse_status=parse_status,
+            approved_by=None,
+            approved_at=None,
+            rule_version=ENGINE_RULE_VERSION,
+        )
+        db.add(row)
+        rows.append(row)
+
+    await db.commit()
+    for row in rows:
+        await db.refresh(row)
+
+    return [TrialCriterionRead.model_validate(row) for row in rows]
+
+
+@router.post("/trials/{trial_id}/criteria/reextract-ai", response_model=list[TrialCriterionRead], status_code=status.HTTP_201_CREATED)
+async def reextract_trial_criteria_with_ai(
+    trial_id: UUID,
+    _: Annotated[User, Depends(require_role(UserRole.owner, UserRole.pi, UserRole.coordinator))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[TrialCriterionRead]:
+    await _get_trial_or_404(db, trial_id)
+    latest_doc, text = await _get_latest_document_text_or_422(db, trial_id)
+    parsed = await parse_criteria_with_ai_from_text(text)
+
+    protocol_normalized = _normalize_for_grounding(text)
+    protocol_chunks = _build_protocol_match_chunks(text)
+
+    await db.execute(
+        delete(TrialCriteria).where(
+            TrialCriteria.trial_id == trial_id,
+            TrialCriteria.document_version == latest_doc.version,
+        )
+    )
+
+    rows: list[TrialCriteria] = []
+    for item in parsed:
+        criterion_text = (item.text or "").strip()
+        if not criterion_text:
+            continue
+
+        expression_payload = item.expression if isinstance(item.expression, dict) else None
+        if expression_payload is not None:
+            try:
+                validate_expression(expression_payload)
+            except Exception:
+                expression_payload = None
+
+        confidence_value = item.confidence if item.confidence == ConfidenceLevel.high else ConfidenceLevel.needs_review
+        parse_status = CriteriaParseStatus.parsed if confidence_value == ConfidenceLevel.high else CriteriaParseStatus.needs_review
+        manual_review_required = bool(item.manual_review_required)
+
+        is_grounded = _is_criterion_grounded(
+            criterion_text=criterion_text,
+            protocol_normalized=protocol_normalized,
+            protocol_chunks=protocol_chunks,
+            quote_snippet=item.quote_snippet,
+        )
+        if not is_grounded:
+            confidence_value = ConfidenceLevel.needs_review
+            parse_status = CriteriaParseStatus.needs_review
+            manual_review_required = True
+        elif parse_status != CriteriaParseStatus.parsed:
+            manual_review_required = True
+
+        row = TrialCriteria(
+            trial_id=trial_id,
+            document_version=latest_doc.version,
+            type=item.type,
+            text=criterion_text,
+            expression=expression_payload,
+            confidence=confidence_value,
+            manual_review_required=manual_review_required,
+            source_order=item.source_order,
+            section_label=item.section_label or ("AI Inclusion" if item.type == CriteriaType.inclusion else "AI Exclusion"),
             parse_status=parse_status,
             approved_by=None,
             approved_at=None,

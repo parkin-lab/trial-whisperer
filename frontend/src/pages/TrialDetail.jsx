@@ -73,6 +73,7 @@ export default function TrialDetail({ onLogout }) {
   const [editParseStatus, setEditParseStatus] = useState('needs_review')
   const [editManualReview, setEditManualReview] = useState(false)
   const [criteriaBusy, setCriteriaBusy] = useState(false)
+  const [criteriaToast, setCriteriaToast] = useState('')
   const [auditEntries, setAuditEntries] = useState([])
   const [auditError, setAuditError] = useState('')
   const [auditBusy, setAuditBusy] = useState(false)
@@ -203,6 +204,12 @@ export default function TrialDetail({ onLogout }) {
     loadCriteria(criteriaView)
   }, [criteriaView, id])
 
+  useEffect(() => {
+    if (!criteriaToast) return undefined
+    const timeoutId = window.setTimeout(() => setCriteriaToast(''), 2800)
+    return () => window.clearTimeout(timeoutId)
+  }, [criteriaToast])
+
   const parseCriteria = async () => {
     setCriteriaBusy(true)
     setCriteriaError('')
@@ -211,6 +218,24 @@ export default function TrialDetail({ onLogout }) {
       await loadCriteria(criteriaView)
     } catch (err) {
       setCriteriaError(err.response?.data?.detail || 'Criteria parsing failed.')
+    } finally {
+      setCriteriaBusy(false)
+    }
+  }
+
+  const reextractCriteriaWithAi = async () => {
+    if (!canReview || criteriaBusy) return
+    const confirmed = window.confirm('Replace current criteria rows with AI extraction?')
+    if (!confirmed) return
+
+    setCriteriaBusy(true)
+    setCriteriaError('')
+    try {
+      await api.post(`/trials/${id}/criteria/reextract-ai`)
+      await loadCriteria(criteriaView)
+      setCriteriaToast('AI re-extraction complete.')
+    } catch (err) {
+      setCriteriaError(err.response?.data?.detail || 'AI re-extraction failed.')
     } finally {
       setCriteriaBusy(false)
     }
@@ -833,6 +858,13 @@ export default function TrialDetail({ onLogout }) {
                     Parse Criteria
                   </button>
                   <button
+                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    onClick={reextractCriteriaWithAi}
+                    disabled={criteriaBusy}
+                  >
+                    Re-extract with AI
+                  </button>
+                  <button
                     className="rounded-lg bg-ink px-3 py-2 text-sm text-white disabled:opacity-50"
                     onClick={approveReviewed}
                     disabled={criteriaBusy}
@@ -1160,6 +1192,12 @@ export default function TrialDetail({ onLogout }) {
 
         <section className="mt-4">{content}</section>
       </main>
+
+      {criteriaToast && (
+        <div className="fixed right-4 top-4 z-40 rounded-lg bg-emerald-600 px-4 py-2 text-sm text-white shadow-lg">
+          {criteriaToast}
+        </div>
+      )}
 
       <UploadModal
         open={uploadOpen}

@@ -87,6 +87,34 @@ Exclusion Criteria:
     assert [item.source_order for item in rows] == [1, 2, 3, 4]
 
 
+async def test_parser_excludes_non_eligibility_sections(monkeypatch):
+    async def _mock_chat_completion(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    monkeypatch.setattr("app.services.criteria_parser.chat_completion", _mock_chat_completion)
+
+    protocol_text = """
+Inclusion Criteria:
+- Age >= 18 years
+- ECOG 0-2
+
+Exclusion Criteria:
+- Active infection
+
+Study Procedures
+- Bone marrow biopsy at baseline
+"""
+    rows = await parse_criteria_from_text(protocol_text)
+
+    assert [item.text for item in rows] == [
+        "Age >= 18 years",
+        "ECOG 0-2",
+        "Active infection",
+    ]
+    assert [item.section_label for item in rows] == ["Inclusion", "Inclusion", "Exclusion"]
+
+
 async def test_failed_expression_parse_stores_null_and_needs_review(client, db_session, monkeypatch):
     reviewer = await _create_user(db_session, role=UserRole.owner)
     token = await _login(client, reviewer.email)
@@ -304,3 +332,93 @@ async def test_approve_reviewed_bulk_endpoint(client, db_session):
     assert by_text["Prior transplant"].approved_at is not None
     assert by_text["Prior transplant"].parse_status == CriteriaParseStatus.approved
     assert by_text["ANC >= 1000"].approved_at is None
+
+
+async def test_reextract_ai_replaces_latest_document_criteria(client, db_session, monkeypatch):
+    reviewer = await _create_user(db_session, role=UserRole.owner)
+    token = await _login(client, reviewer.email)
+    trial, doc = await _create_trial_with_document(db_session, reviewer.id)
+
+    db_session.add(
+        TrialCriteria(
+            trial_id=trial.id,
+            document_version=doc.version,
+            type=CriteriaType.inclusion,
+            text="Old criterion",
+            expression=None,
+            confidence=ConfidenceLevel.needs_review,
+            manual_review_required=True,
+            source_order=1,
+            section_label="Inclusion",
+            parse_status=CriteriaParseStatus.needs_review,
+            rule_version="1.0.0",
+        )
+    )
+    await db_session.commit()
+
+    protocol_text = """
+Inclusion Criteria:
+- Age >= 18 years
+
+Exclusion Criteria:
+- Active infection
+"""
+
+    async def _download_file(file_path):
+        del file_path
+        return b"pdf", doc.filename
+
+    async def _parse_with_ai(text):
+        del text
+        return [
+            ParsedCriterion(
+                type=CriteriaType.inclusion,
+                text="Age >= 18 years",
+                expression=None,
+                confidence=ConfidenceLevel.high,
+                manual_review_required=False,
+                source_order=1,
+                section_label="AI Inclusion",
+                parse_status=CriteriaParseStatus.parsed,
+                quote_snippet="Age >= 18 years",
+            ),
+            ParsedCriterion(
+                type=CriteriaType.exclusion,
+                text="No tattoo on left arm",
+                expression=None,
+                confidence=ConfidenceLevel.high,
+                manual_review_required=False,
+                source_order=2,
+                section_label="AI Exclusion",
+                parse_status=CriteriaParseStatus.parsed,
+                quote_snippet="No tattoo on left arm",
+            ),
+        ]
+
+    monkeypatch.setattr(criteria_router, "storage_download_file", _download_file)
+    monkeypatch.setattr(criteria_router, "get_local_path_for_extraction", lambda file_path, contents: file_path)
+    monkeypatch.setattr(criteria_router, "extract_text", lambda _: protocol_text)
+    monkeypatch.setattr(criteria_router, "parse_criteria_with_ai_from_text", _parse_with_ai)
+
+    response = await client.post(
+        f"/trials/{trial.id}/criteria/reextract-ai",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 201
+    payload = response.json()
+    assert len(payload) == 2
+
+    rows = (
+        await db_session.execute(
+            select(TrialCriteria).where(
+                TrialCriteria.trial_id == trial.id,
+                TrialCriteria.document_version == doc.version,
+            )
+        )
+    ).scalars().all()
+    by_text = {row.text: row for row in rows}
+    assert "Old criterion" not in by_text
+    assert by_text["Age >= 18 years"].parse_status == CriteriaParseStatus.parsed
+    assert by_text["Age >= 18 years"].section_label == "AI Inclusion"
+    assert by_text["No tattoo on left arm"].parse_status == CriteriaParseStatus.needs_review
+    assert by_text["No tattoo on left arm"].confidence == ConfidenceLevel.needs_review
