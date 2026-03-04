@@ -369,6 +369,7 @@ async def _map_structured_expressions(criteria: list[ParsedCriterion]) -> dict[i
         messages=[{"role": "user", "content": json.dumps(mapping_payload, ensure_ascii=True)}],
         system=MAPPING_SYSTEM_PROMPT,
         max_tokens=4096,
+        timeout_seconds=90.0,
     )
     if response is None:
         return {}
@@ -477,6 +478,7 @@ async def parse_criteria_with_ai_from_text(text: str) -> list[ParsedCriterion]:
         messages=[{"role": "user", "content": text}],
         system=AI_EXTRACTION_SYSTEM_PROMPT,
         max_tokens=4096,
+        timeout_seconds=180.0,
     )
     if response is None:
         return []

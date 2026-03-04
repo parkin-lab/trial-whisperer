@@ -19,6 +19,7 @@ async def chat_completion(
     model: str | None = None,
     system: str | None = None,
     max_tokens: int = 2048,
+    timeout_seconds: float = 60.0,
 ) -> str | None:
     """
     Call OpenClaw's OpenAI-compatible chat completions endpoint.
@@ -47,7 +48,7 @@ async def chat_completion(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             response = await client.post(
                 f"{settings.openclaw_gateway_url}/v1/chat/completions",
                 json=payload,
