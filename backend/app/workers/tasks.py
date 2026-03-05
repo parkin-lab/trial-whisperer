@@ -13,7 +13,7 @@ from app.database import AsyncSessionLocal
 from app.engine.schema import validate_expression
 from app.models.enums import ConfidenceLevel, CriteriaParseStatus, JobStatus, TrialExtractionStatus
 from app.models.trial import BackgroundJob, Trial, TrialCriteria, TrialDocument
-from app.services.criteria_parser import parse_criteria_from_text
+from app.services.criteria_parser import parse_criteria_from_text, parse_criteria_with_ai_from_text
 from app.services.ctg import fetch_study, first_study_result, search_studies, search_web
 from app.services.ctg_resolver import (
     build_keyword_queries,
@@ -184,7 +184,11 @@ async def _upsert_parsed_criteria(
         )
     )
 
-    parsed = await parse_criteria_from_text(text)
+    # Match the prior user-facing "Extract Criteria" behavior: AI-first extraction,
+    # then deterministic fallback when AI returns no rows.
+    parsed = await parse_criteria_with_ai_from_text(text)
+    if not parsed:
+        parsed = await parse_criteria_from_text(text)
     if not parsed:
         logger.info(
             "Criteria parser returned no rows",
