@@ -47,16 +47,6 @@ function truncateSummary(value, maxLength = 180) {
   return `${value.slice(0, maxLength)}...`
 }
 
-function expressionPreview(expression) {
-  if (!expression || typeof expression !== 'object') return 'No structured mapping (manual review)'
-  if (expression.field === 'manual_review_placeholder') return 'No structured mapping (manual review)'
-  const op = typeof expression.op === 'string' ? expression.op : 'expression'
-  const field = typeof expression.field === 'string' ? expression.field : ''
-  const value = Object.prototype.hasOwnProperty.call(expression, 'value') ? String(expression.value) : ''
-  const summary = [op, field && `(${field})`, value && `= ${value}`].filter(Boolean).join(' ')
-  return summary.length > 96 ? `${summary.slice(0, 96)}...` : summary
-}
-
 export default function TrialDetail({ onLogout }) {
   const { user } = useAuth()
   const { id } = useParams()
@@ -282,27 +272,6 @@ export default function TrialDetail({ onLogout }) {
     }
   }
 
-  const markVisibleManualOnly = async () => {
-    if (!canReview || criteriaBusy) return
-    const visibleIds = criteria.filter((row) => row.parse_status !== 'manual_only').map((row) => row.id)
-    if (visibleIds.length === 0) {
-      setCriteriaToast('All visible criteria are already manual-only.')
-      return
-    }
-
-    setCriteriaBusy(true)
-    setCriteriaError('')
-    try {
-      await api.post(`/trials/${id}/criteria/mark-manual-visible`, { criterion_ids: visibleIds })
-      await loadCriteria(criteriaView)
-      setCriteriaToast(`Marked ${visibleIds.length} visible criteria as manual-only.`)
-    } catch (err) {
-      setCriteriaError(err.response?.data?.detail || 'Mark manual-only failed.')
-    } finally {
-      setCriteriaBusy(false)
-    }
-  }
-
   const deleteCriterion = async (criterionId) => {
     if (!canReview || criteriaBusy) return
     const confirmed = window.confirm('Delete this criterion?')
@@ -315,24 +284,6 @@ export default function TrialDetail({ onLogout }) {
       await loadCriteria(criteriaView)
     } catch (err) {
       setCriteriaError(err.response?.data?.detail || 'Delete failed.')
-    } finally {
-      setCriteriaBusy(false)
-    }
-  }
-
-  const toggleManualOnly = async (criterion) => {
-    if (!canReview || criteriaBusy) return
-    setCriteriaBusy(true)
-    setCriteriaError('')
-    try {
-      const isManualOnly = criterion.parse_status === 'manual_only'
-      await api.patch(`/trials/${id}/criteria/${criterion.id}`, {
-        parse_status: isManualOnly ? 'needs_review' : 'manual_only',
-        manual_review_required: !isManualOnly,
-      })
-      await loadCriteria(criteriaView)
-    } catch (err) {
-      setCriteriaError(err.response?.data?.detail || 'Manual-only toggle failed.')
     } finally {
       setCriteriaBusy(false)
     }
@@ -936,7 +887,7 @@ export default function TrialDetail({ onLogout }) {
               <h4 className="font-display text-lg">Criteria Review</h4>
               {canReview && (
                 <p className="text-xs text-slate-500">
-                  Criteria are automatically extracted after protocol ingestion. Use re-extract only if you want to refresh.
+                  Criteria are automatically extracted after protocol ingestion.
                 </p>
               )}
             </div>
@@ -962,14 +913,6 @@ export default function TrialDetail({ onLogout }) {
                   disabled={criteriaBusy}
                 >
                   Approve All Visible
-                </button>
-                <button
-                  className="rounded-lg border border-violet-300 px-3 py-2 text-sm text-violet-800 disabled:opacity-50"
-                  onClick={markVisibleManualOnly}
-                  disabled={criteriaBusy}
-                  title="Keep as text criterion; do not require structured rule."
-                >
-                  Mark Visible Manual-only
                 </button>
               </div>
             )}
@@ -1004,9 +947,6 @@ export default function TrialDetail({ onLogout }) {
                     <th className="px-4 py-3">#</th>
                     <th className="px-4 py-3">Criterion text</th>
                     <th className="px-4 py-3">
-                      <span title="Machine-readable rule used for automated screening. Optional.">Structured mapping</span>
-                    </th>
-                    <th className="px-4 py-3">
                       <span title="Extraction confidence (high vs needs review).">Confidence</span>
                     </th>
                     <th className="px-4 py-3">
@@ -1025,9 +965,6 @@ export default function TrialDetail({ onLogout }) {
                           <span className="badge bg-slate-100 text-slate-700">{sourceOrder}</span>
                         </td>
                         <td className="px-4 py-3">{row.text}</td>
-                        <td className="px-4 py-3 text-xs text-slate-700">
-                          {expressionPreview(row.expression)}
-                        </td>
                         <td className="px-4 py-3">
                           <span className={`badge ${confidenceClass[row.confidence] || 'bg-slate-100 text-slate-700'}`}>
                             {row.confidence}
@@ -1045,33 +982,22 @@ export default function TrialDetail({ onLogout }) {
                                 className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
                                 onClick={() => openEdit(row)}
                                 disabled={criteriaBusy}
-                              >
-                                Edit
-                              </button>
+                               title="Edit">✏️</button>
                               <button
                                 className="rounded-lg border border-rose-300 px-2 py-1 text-xs text-rose-700"
                                 onClick={() => deleteCriterion(row.id)}
                                 disabled={criteriaBusy}
-                              >
-                                Delete
-                              </button>
+                               title="Delete">🗑️</button>
                               {!row.approved_at && (
                                 <button
                                   className="rounded-lg bg-ink px-2 py-1 text-xs text-white"
                                   onClick={() => approveCriterion(row.id)}
                                   disabled={criteriaBusy}
+                                  title="Approve"
                                 >
-                                  Approve
+                                  ✅
                                 </button>
                               )}
-                              <button
-                                className="rounded-lg border border-violet-300 px-2 py-1 text-xs text-violet-800"
-                                onClick={() => toggleManualOnly(row)}
-                                disabled={criteriaBusy}
-                                title="Keep as text criterion; do not require structured rule."
-                              >
-                                {row.parse_status === 'manual_only' ? 'Manual-only: On' : 'Mark Manual-only'}
-                              </button>
                             </div>
                           ) : (
                             <span className="text-xs text-slate-500">No actions available</span>

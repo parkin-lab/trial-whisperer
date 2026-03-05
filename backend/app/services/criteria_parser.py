@@ -407,9 +407,12 @@ def _criteria_type_from_value(value: str | None) -> CriteriaType | None:
 
 def _confidence_from_value(value: str | None) -> ConfidenceLevel:
     normalized = (value or "").strip().lower()
-    if normalized == ConfidenceLevel.high.value:
+    # AI extraction now defaults to high confidence unless explicitly marked needs_review.
+    if not normalized:
         return ConfidenceLevel.high
-    return ConfidenceLevel.needs_review
+    if normalized == ConfidenceLevel.needs_review.value:
+        return ConfidenceLevel.needs_review
+    return ConfidenceLevel.high
 
 
 def _set_row_needs_review(row: ParsedCriterion) -> None:
