@@ -791,23 +791,7 @@ export default function TrialDetail({ onLogout }) {
             )}
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-white p-4">
-            <h4 className="font-display text-lg">CTG Snapshot</h4>
-            {snapshots.length === 0 ? (
-              <p className="mt-2 text-sm text-slate-600">No snapshot available yet.</p>
-            ) : (
-              <div className="mt-2 space-y-2 text-sm">
-                {snapshots.map((item, idx) => (
-                  <div key={`${item.nct_id || 'snapshot'}-${idx}`} className="rounded-lg bg-fog p-2">
-                    <div className="font-medium">Clinical Trial Record</div>
-                    <div className="text-slate-600">
-                      {item.nct_id} | pulled {new Date(item.pulled_at).toLocaleString()}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          
 
           {(canArchive || canDelete) && (
             <div className="rounded-xl border border-slate-200 bg-white p-4">
@@ -979,18 +963,18 @@ export default function TrialDetail({ onLogout }) {
                           {canReview ? (
                             <div className="flex flex-wrap gap-2">
                               <button
-                                className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                                className="text-base leading-none opacity-90 hover:opacity-100"
                                 onClick={() => openEdit(row)}
                                 disabled={criteriaBusy}
                                title="Edit">✏️</button>
                               <button
-                                className="rounded-lg border border-rose-300 px-2 py-1 text-xs text-rose-700"
+                                className="text-base leading-none text-rose-700 opacity-90 hover:opacity-100"
                                 onClick={() => deleteCriterion(row.id)}
                                 disabled={criteriaBusy}
                                title="Delete">🗑️</button>
                               {!row.approved_at && (
                                 <button
-                                  className="rounded-lg bg-ink px-2 py-1 text-xs text-white"
+                                  className="text-base leading-none text-emerald-700 opacity-90 hover:opacity-100"
                                   onClick={() => approveCriterion(row.id)}
                                   disabled={criteriaBusy}
                                   title="Approve"
@@ -1123,7 +1107,7 @@ export default function TrialDetail({ onLogout }) {
                         ) : (
                           <div>
                             <button
-                              className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                              className="text-base leading-none opacity-90 hover:opacity-100"
                               onClick={() => toggleAuditDetails(entry.id)}
                             >
                               {isExpanded ? 'Hide' : 'Show'} ({entryCriteria.length})
@@ -1341,3 +1325,11 @@ function SpinnerIcon({ className = 'h-4 w-4' }) {
     </svg>
   )
 }
+function prettyLabel(value) {
+  if (!value) return '—'
+  return String(value)
+    .replace(/_/g, ' ')
+    .replace(/\w/g, (m) => m.toUpperCase())
+}
+
+
