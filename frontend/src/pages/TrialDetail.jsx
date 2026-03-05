@@ -81,7 +81,6 @@ export default function TrialDetail({ onLogout }) {
   const [editParseStatus, setEditParseStatus] = useState('needs_review')
   const [editManualReview, setEditManualReview] = useState(false)
   const [criteriaBusy, setCriteriaBusy] = useState(false)
-  const [criteriaProcessingMode, setCriteriaProcessingMode] = useState('')
   const [criteriaToast, setCriteriaToast] = useState('')
   const [auditEntries, setAuditEntries] = useState([])
   const [auditError, setAuditError] = useState('')
@@ -233,23 +232,6 @@ export default function TrialDetail({ onLogout }) {
     const timeoutId = window.setTimeout(() => setCriteriaToast(''), 2800)
     return () => window.clearTimeout(timeoutId)
   }, [criteriaToast])
-
-  const extractCriteria = async () => {
-    if (!canReview || criteriaBusy) return
-    setCriteriaBusy(true)
-    setCriteriaProcessingMode('extract')
-    setCriteriaError('')
-    try {
-      await api.post(`/trials/${id}/criteria/reextract-ai`)
-      await loadCriteria(criteriaView)
-      setCriteriaToast('Criteria extraction complete.')
-    } catch (err) {
-      setCriteriaError(err.response?.data?.detail || 'Criteria extraction failed.')
-    } finally {
-      setCriteriaProcessingMode('')
-      setCriteriaBusy(false)
-    }
-  }
 
   const approveCriterion = async (criterionId) => {
     setCriteriaBusy(true)
@@ -953,25 +935,11 @@ export default function TrialDetail({ onLogout }) {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h4 className="font-display text-lg">Criteria Review</h4>
               {canReview && (
-                <div>
-                  <button
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:opacity-50"
-                    onClick={extractCriteria}
-                    disabled={criteriaBusy}
-                  >
-                    {criteriaProcessingMode === 'extract' ? 'Extract Criteria ...' : 'Extract Criteria'}
-                  </button>
-                  <p className="mt-1 text-xs text-slate-500">AI-first extraction with deterministic guardrails under the hood.</p>
-                </div>
+                <p className="text-xs text-slate-500">
+                  Criteria are automatically extracted after protocol ingestion. Use re-extract only if you want to refresh.
+                </p>
               )}
             </div>
-
-            {criteriaProcessingMode === 'extract' && (
-              <div className="mt-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                <SpinnerIcon />
-                <span>Extracting criteria... this can take up to 2 minutes.</span>
-              </div>
-            )}
 
             {reviewStatus && (
               <div className="mt-3 rounded-lg bg-fog px-3 py-2 text-sm text-slate-700">
@@ -1274,7 +1242,6 @@ export default function TrialDetail({ onLogout }) {
     reviewStatus,
     criteriaError,
     criteriaBusy,
-    criteriaProcessingMode,
     auditEntries,
     auditError,
     auditBusy,
